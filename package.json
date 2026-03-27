@@ -1,0 +1,21 @@
+{
+  "name": "linkedin-saas",
+  "private": true,
+  "workspaces": [
+    "backend",
+    "automation",
+    "frontend"
+  ],
+  "scripts": {
+    "build": "npm run build -w automation && npm run build -w backend && npm run build -w frontend",
+    "dev": "concurrently -k -n api,worker,sch,web -c blue,green,yellow,magenta \"npm run dev:api\" \"npm run dev:worker\" \"npm run dev:scheduler\" \"npm run dev:frontend\"",
+    "dev:api": "npm run dev -w backend",
+    "dev:worker": "npm run worker -w backend",
+    "dev:scheduler": "npm run scheduler -w backend",
+    "dev:frontend": "npm run dev -w frontend",
+    "predev": "npm run build -w automation"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2"
+  }
+}
