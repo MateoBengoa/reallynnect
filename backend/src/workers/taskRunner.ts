@@ -162,7 +162,7 @@ async function extractThreadIdFromMessagingPane(page: Page): Promise<string | nu
       .evaluate((root) => {
         const walk = root.parentElement ?? root;
         const html = (walk.closest("main") ?? walk).innerHTML;
-        const m = html.match(/\/messaging\/thread\/([^"'\\s&?#%<>]+)/i);
+        const m = html.match(/\/messaging\/thread\/([^"'\\s<>]+)/i);
         return m?.[1] ? decodeURIComponent(m[1]) : "";
       })
       .catch(() => "");
@@ -172,7 +172,7 @@ async function extractThreadIdFromMessagingPane(page: Page): Promise<string | nu
     .evaluate(() => {
       const main = document.querySelector("main");
       const html = main?.innerHTML ?? document.body.innerHTML;
-      const m = html.match(/\/messaging\/thread\/([^"'\\s&?#%<>]+)/i);
+      const m = html.match(/\/messaging\/thread\/([^"'\\s<>]+)/i);
       return m?.[1] ? decodeURIComponent(m[1]) : "";
     })
     .catch(() => null);
@@ -186,29 +186,50 @@ async function extractInboxRowsFromListDom(page: Page, max: number): Promise<Inb
     const out: InboxListRow[] = [];
     const seen = new Set<string>();
     const rowEls: Element[] = [];
+    const threadFrom = (s: string): string => {
+      const m = s.match(/\/messaging\/thread\/([^/?#"'\\s<>]+)/i);
+      if (!m?.[1]) return "";
+      try {
+        return decodeURIComponent(m[1]);
+      } catch {
+        return m[1];
+      }
+    };
     for (const sel of [
       '[data-view-name="message-list-item"]',
+      '[data-view-name="message-list-item-conversation"]',
       ".msg-conversation-listitem",
       ".msg-conversations-container__conversations-list > li",
       "ul.msg-conversations-container__conversations-list li",
+      'aside [role="listitem"]',
+      "aside li",
     ]) {
       document.querySelectorAll(sel).forEach((el) => {
         if (rowEls.includes(el)) return;
         if (el.closest(".msg-s-message-list-container")) return;
+        if (el.closest("[data-view-name='message-pane']")) return;
         rowEls.push(el);
       });
     }
     for (const row of rowEls) {
       if (out.length >= maxN) break;
       const html = row.outerHTML;
-      let conversationId = "";
-      const m = html.match(/\/messaging\/thread\/([^"'\\s&?#%<>]+)/i);
-      if (m?.[1]) conversationId = decodeURIComponent(m[1]);
+      let conversationId = threadFrom(html);
       if (!conversationId) {
         const a = row.querySelector("a[href*='/messaging/thread/']") as HTMLAnchorElement | null;
-        if (a?.href) {
-          const m2 = a.href.match(/\/messaging\/thread\/([^/?#]+)/i);
-          if (m2?.[1]) conversationId = decodeURIComponent(m2[1]);
+        if (a?.href) conversationId = threadFrom(a.href);
+      }
+      if (!conversationId) {
+        const attrNodes = row.querySelectorAll("a[href], [data-href], [data-item-id]");
+        for (const node of Array.from(attrNodes)) {
+          if (conversationId) break;
+          for (const attr of ["href", "data-href", "data-item-id"] as const) {
+            const v = node.getAttribute(attr);
+            if (v && v.includes("/messaging/thread/")) {
+              conversationId = threadFrom(v);
+              break;
+            }
+          }
         }
       }
       if (!conversationId || seen.has(conversationId)) continue;
@@ -262,45 +283,26 @@ async function scrollThreadMessageListToBottom(page: Page): Promise<void> {
   await new Promise((r) => setTimeout(r, 450));
 }
 
-function textLooksLikeNameOnly(text: string, peerHint: string | null | undefined): boolean {
-  const t = normalizeMsgText(text);
-  if (!t) return true;
-  const p = normalizeMsgText(peerHint ?? "");
-  if (!p) return false;
-  if (t === p) return true;
-  if (t.startsWith(p) && t.length <= p.length + 24) {
-    const rest = normalizeMsgText(t.slice(p.length));
-    if (!rest || /^[·•\d:,\/\s\-–]+$/.test(rest)) return true;
-  }
-  return false;
-}
-
-async function readEventItemMessageText(item: ReturnType<Page["locator"]>): Promise<string> {
-  const bodyLocators = [
-    "[class*='msg-s-event-listitem__message-body']",
-    "[class*='message-body']",
-    ".msg-s-message-group__message",
-    "p.msg-s-message-group__text",
-    ".msg-s-message-group__text",
-    "[class*='msg-s-message-group__text']",
-  ];
-  for (const sel of bodyLocators) {
-    const body = item.locator(sel).first();
-    const raw = (await body.innerText().catch(() => "")) ?? "";
-    const t = normalizeMsgText(raw);
-    if (t.length > 0) return t;
-  }
-  return normalizeMsgText((await item.innerText().catch(() => "")) ?? "");
-}
-
-async function eventItemFromSelf(item: ReturnType<Page["locator"]>): Promise<boolean> {
-  if (
-    (await item.locator(".msg-s-message-group--my-message, [class*='message-from-me'], [class*='from-me']").count()) > 0
-  )
-    return true;
-  return item
-    .evaluate((el) => /from-myself|from-me|my-message|msg-s-message-group--my-message/i.test(el.className))
-    .catch(() => false);
+/**
+ * InMail / patrocinado: no hay burbujas estándar; tomar texto visible del panel (sin caja de envío).
+ */
+async function readMessagingPaneFallback(page: Page): Promise<{ text: string; direction: "in" | "out" } | null> {
+  const raw = await page
+    .evaluate(() => {
+      const pane =
+        document.querySelector("[data-view-name='message-pane']") ||
+        document.querySelector(".msg-s-message-list-container") ||
+        document.querySelector(".msg-thread");
+      if (!pane) return "";
+      const el = pane as HTMLElement;
+      const clone = el.cloneNode(true) as HTMLElement;
+      clone.querySelectorAll("form, .msg-form, [role='textbox'], textarea, button").forEach((n) => n.remove());
+      return (clone.innerText || "").replace(/\s+/g, " ").trim().slice(0, 8000);
+    })
+    .catch(() => "");
+  const t = normalizeMsgText(raw);
+  if (t.length < 2) return null;
+  return { text: t.slice(0, 4000), direction: "in" };
 }
 
 async function readLastMessageRow(
@@ -308,29 +310,69 @@ async function readLastMessageRow(
   peerNameHint?: string | null
 ): Promise<{ text: string; direction: "in" | "out" } | null> {
   await scrollThreadMessageListToBottom(page);
-  const items = page.locator(
-    ".msg-s-event-listitem, .msg-s-message-list__event, li.msg-s-message-list__event, li[class*='msg-s-message-list'], [class*='msg-s-event-listitem']"
-  );
-  const n = await items.count();
-  if (n < 1) return null;
 
-  const tryIndex = async (idx: number): Promise<{ text: string; direction: "in" | "out" } | null> => {
-    const item = items.nth(idx);
-    const text = await readEventItemMessageText(item);
-    if (!text) return null;
-    const fromSelf = await eventItemFromSelf(item);
-    return { text: text.slice(0, 4000), direction: fromSelf ? "out" : "in" };
-  };
+  type RowRead = { text: string; direction: "in" | "out" } | null;
+  const scoped = (await page.evaluate((hint: string | null) => {
+    const norm = (s: string) => s.replace(/\s+/g, " ").trim();
+    const nameOnly = (text: string, peer: string | null): boolean => {
+      const t = norm(text);
+      if (!t) return true;
+      const p = norm(peer ?? "");
+      if (p && t === p) return true;
+      if (p && t.startsWith(p) && t.length <= p.length + 24) {
+        const rest = norm(t.slice(p.length));
+        if (!rest || /^[·•\d:,\/\s\-–]+$/.test(rest)) return true;
+      }
+      return false;
+    };
 
-  const maxBack = Math.min(6, n);
-  for (let back = 1; back <= maxBack; back++) {
-    const row = await tryIndex(n - back);
-    if (!row) continue;
-    if (textLooksLikeNameOnly(row.text, peerNameHint)) continue;
-    return row;
-  }
+    const root =
+      document.querySelector(".msg-s-message-list-container") ||
+      document.querySelector("ul.msg-s-message-list") ||
+      document.querySelector(".msg-s-message-list");
+    if (!root) return null;
 
-  return tryIndex(n - 1);
+    const nodes = Array.from(
+      root.querySelectorAll(
+        ".msg-s-event-listitem, li.msg-s-message-list__event, [data-view-name='message-list-item-event']"
+      )
+    ).filter((el) => el.closest(".msg-conversations-container__conversations-list") === null);
+
+    const bodyOf = (item: Element): string => {
+      const prefer = item.querySelector(
+        "[class*='msg-s-event-listitem__message-body'], [class*='message-body'], .msg-s-message-group__message, p.msg-s-message-group__text"
+      );
+      const t = norm((prefer?.textContent || item.textContent || "") as string);
+      return t;
+    };
+
+    const fromSelf = (item: Element): boolean => {
+      const cls = item.className?.toString?.() ?? "";
+      return /from-myself|from-me|my-message|msg-s-message-group--my-message/i.test(cls) ||
+        item.querySelector(".msg-s-message-group--my-message, [class*='message-from-me']") !== null;
+    };
+
+    const n = nodes.length;
+    if (n < 1) return null;
+
+    const maxBack = Math.min(8, n);
+    for (let back = 1; back <= maxBack; back++) {
+      const item = nodes[n - back] as HTMLElement;
+      const text = bodyOf(item);
+      if (!text) continue;
+      if (nameOnly(text, hint)) continue;
+      return { text: text.slice(0, 4000), direction: fromSelf(item) ? "out" : "in" };
+    }
+
+    const last = nodes[n - 1] as HTMLElement;
+    const t = bodyOf(last);
+    if (!t) return null;
+    return { text: t.slice(0, 4000), direction: fromSelf(last) ? "out" : "in" };
+  }, peerNameHint ?? null)) as RowRead;
+
+  if (scoped) return scoped;
+
+  return readMessagingPaneFallback(page);
 }
 
 async function insertChatRowIfFresh(
@@ -538,6 +580,39 @@ async function ingestCurrentMessagingThread(
   }
 }
 
+/** Selectors for conversation list rows (sidebar). */
+const CONV_ROW_SELECTORS = [
+  '[data-view-name="message-list-item"]',
+  '[data-view-name="message-list-item-conversation"]',
+  ".msg-conversation-listitem",
+  ".msg-conversations-container__conversations-list > li",
+  "ul.msg-conversations-container__conversations-list li",
+  'aside li[class*="conversation"]',
+  'aside ul li',
+] as const;
+
+async function getConvRowCount(page: Page): Promise<number> {
+  for (const sel of CONV_ROW_SELECTORS) {
+    const n = await page.locator(sel).count().catch(() => 0);
+    if (n > 0) return n;
+  }
+  return 0;
+}
+
+async function clickConvRow(page: Page, selectorIndex: number, rowIndex: number): Promise<boolean> {
+  for (const sel of CONV_ROW_SELECTORS) {
+    const loc = page.locator(sel).nth(rowIndex);
+    const ok = await loc.isVisible({ timeout: 3000 }).catch(() => false);
+    if (!ok) continue;
+    await loc.scrollIntoViewIfNeeded({ timeout: 5000 }).catch(() => {});
+    await loc.click({ timeout: 12_000, force: true }).catch(async () => {
+      await loc.click({ timeout: 8_000 }).catch(() => {});
+    });
+    return true;
+  }
+  return false;
+}
+
 async function runMessagingInboxSync(
   page: Page,
   sb: SupabaseClient,
@@ -546,60 +621,107 @@ async function runMessagingInboxSync(
   opts: { keywordsAutoReply: boolean; maxThreads: number }
 ): Promise<void> {
   await page.goto("https://www.linkedin.com/messaging/", { waitUntil: "domcontentloaded", timeout: 60000 });
-  await new Promise((r) => setTimeout(r, 1600));
-  await page.locator("main, .application-outlet").first().waitFor({ state: "visible", timeout: 20000 }).catch(() => {});
-  await scrollMessagingConversationList(page);
+  await new Promise((r) => setTimeout(r, 2000));
+  await page.locator("main, .application-outlet, aside").first().waitFor({ state: "visible", timeout: 25000 }).catch(() => {});
+  await new Promise((r) => setTimeout(r, 1000));
 
   const { data: rulesRaw } = opts.keywordsAutoReply
     ? await sb.from("keyword_rules").select("*").eq("user_id", userId).eq("rule_type", "dm")
     : { data: [] as DmRuleRow[] };
   const rules = (rulesRaw ?? []) as DmRuleRow[];
 
-  let rows = await collectInboxRowsWithScroll(page, opts.maxThreads);
-  if (rows.length === 0) {
-    await scrollMessagingConversationList(page);
-    await new Promise((r) => setTimeout(r, 500));
-    rows = await collectInboxRowsWithScroll(page, opts.maxThreads);
+  // — Ruta rápida: IDs ya en el DOM (LinkedIn antiguo / algunos navegadores) —
+  await scrollMessagingConversationList(page);
+  let domRows = await collectInboxRowsWithScroll(page, opts.maxThreads);
+  if (domRows.length === 0) {
+    await new Promise((r) => setTimeout(r, 800));
+    domRows = await collectInboxRowsWithScroll(page, opts.maxThreads);
   }
 
-  if (rows.length > 0) {
-    for (const row of rows) {
+  if (domRows.length > 0) {
+    console.log(`[inbox_sync] ruta rápida DOM: ${domRows.length} hilos`);
+    for (const row of domRows) {
       const url = `https://www.linkedin.com/messaging/thread/${encodeURIComponent(row.conversationId)}/`;
       await page.goto(url, { waitUntil: "domcontentloaded", timeout: 50000 });
-      await new Promise((r) => setTimeout(r, 800));
-      await ingestCurrentMessagingThread(page, sb, accountId, rules, opts.keywordsAutoReply, row.peerName);
-    }
-    return;
-  }
-
-  const threadUrls = await collectMessagingThreadUrlsFromAnchors(page, opts.maxThreads);
-  console.log(`[inbox_sync] enlaces <a> /thread/: ${threadUrls.length}`);
-  if (threadUrls.length > 0) {
-    for (const threadUrl of threadUrls) {
-      await page.goto(threadUrl, { waitUntil: "domcontentloaded", timeout: 50000 });
       await new Promise((r) => setTimeout(r, 700));
-      await ingestCurrentMessagingThread(page, sb, accountId, rules, opts.keywordsAutoReply);
+      await ingestCurrentMessagingThread(page, sb, accountId, rules, opts.keywordsAutoReply, row.peerName).catch((e) => {
+        console.log(`[inbox_sync] ruta rápida ingest error: ${String(e).slice(0, 80)}`);
+      });
     }
     return;
   }
 
-  console.log("[inbox_sync] modo clic + panel (último recurso)");
-  const rowLoc = page.locator(
-    '[data-view-name="message-list-item"], .msg-conversation-listitem, .msg-conversations-container__conversations-list li'
-  );
-  const n = await rowLoc.count();
-  console.log(`[inbox_sync] filas clicables: ${n}`);
-  const maxI = Math.min(Math.max(n, 0), opts.maxThreads);
-  for (let i = 0; i < maxI; i++) {
-    const items = page.locator(
-      '[data-view-name="message-list-item"], .msg-conversation-listitem, .msg-conversations-container__conversations-list li'
-    );
-    const c = await items.count();
-    if (i >= c) break;
-    await items.nth(i).click({ timeout: 10000 }).catch(() => {});
-    await new Promise((r) => setTimeout(r, 900));
-    await ingestCurrentMessagingThread(page, sb, accountId, rules, opts.keywordsAutoReply);
+  // — Ruta clic: nueva UI de LinkedIn (URL cambia al hacer clic en la fila) —
+  // Volver a la lista porque pudimos haber ido a /messaging/thread/… en intentos anteriores
+  if (!page.url().startsWith("https://www.linkedin.com/messaging/")) {
+    await page.goto("https://www.linkedin.com/messaging/", { waitUntil: "domcontentloaded", timeout: 60000 });
+    await new Promise((r) => setTimeout(r, 2000));
   }
+
+  // Scroll para cargar filas virtualizadas
+  await scrollMessagingConversationList(page);
+  await new Promise((r) => setTimeout(r, 600));
+
+  const totalRows = await getConvRowCount(page);
+  console.log(`[inbox_sync] clic-URL mode: ${totalRows} filas detectadas`);
+  if (totalRows === 0) {
+    console.log("[inbox_sync] sin filas; inbox vacío o selectores desactualizados");
+    return;
+  }
+
+  const maxI = Math.min(totalRows, opts.maxThreads);
+  const seenIds = new Set<string>();
+  const perRowMs = inboxEnvInt("INBOX_CLICK_INGEST_TIMEOUT_MS", 18_000);
+
+  for (let i = 0; i < maxI; i++) {
+    // Volver a la lista si estamos en un hilo
+    if (page.url().includes("/messaging/thread/")) {
+      await page.goto("https://www.linkedin.com/messaging/", { waitUntil: "domcontentloaded", timeout: 40000 });
+      await new Promise((r) => setTimeout(r, 1400));
+      await scrollMessagingConversationList(page);
+      await new Promise((r) => setTimeout(r, 400));
+    }
+
+    const urlBefore = page.url();
+    console.log(`[inbox_sync] clic fila ${i + 1}/${maxI}`);
+    const clicked = await clickConvRow(page, 0, i);
+    if (!clicked) {
+      console.log(`[inbox_sync] fila ${i + 1} no clickeable, saltar`);
+      continue;
+    }
+
+    // Esperar a que la URL cambie a /messaging/thread/...
+    let conversationId = "";
+    try {
+      await page.waitForURL("**/messaging/thread/**", { timeout: perRowMs });
+      const newUrl = page.url();
+      const m = newUrl.match(/\/messaging\/thread\/([^/?#]+)/i);
+      if (m?.[1]) conversationId = decodeURIComponent(m[1]);
+    } catch {
+      // URL no cambió: intentar leer ID del panel
+      conversationId = (await extractConversationIdFromMessagingUrl(page)) ?? "";
+      if (!conversationId) conversationId = (await extractThreadIdFromMessagingPane(page)) ?? "";
+    }
+
+    if (!conversationId) {
+      console.log(`[inbox_sync] fila ${i + 1}: no se obtuvo conversationId, saltar`);
+      continue;
+    }
+    if (seenIds.has(conversationId)) {
+      console.log(`[inbox_sync] fila ${i + 1}: ${conversationId.slice(0, 12)}… ya procesado`);
+      continue;
+    }
+    seenIds.add(conversationId);
+
+    console.log(`[inbox_sync] ingestando ${conversationId.slice(0, 14)}…`);
+    try {
+      await ingestCurrentMessagingThread(page, sb, accountId, rules, opts.keywordsAutoReply);
+    } catch (e) {
+      console.log(`[inbox_sync] fila ${i + 1} ingest error: ${String(e).slice(0, 100)}`);
+    }
+    await new Promise((r) => setTimeout(r, 300));
+  }
+  console.log(`[inbox_sync] terminado: ${seenIds.size} hilos ingestionados`);
 }
 
 /** Tareas en `running` si el worker murió nunca vuelven a `pending` sin esto. */

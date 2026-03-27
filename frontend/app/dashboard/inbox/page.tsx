@@ -23,8 +23,6 @@ type Msg = {
   peer_name?: string | null;
 };
 
-const INBOX_AUTO_SYNC_COOLDOWN_MS = 7 * 60 * 1000;
-
 export default function InboxPage() {
   const [accounts, setAccounts] = useState<LiAccount[]>([]);
   const [accountId, setAccountId] = useState<string>("");
@@ -69,6 +67,26 @@ export default function InboxPage() {
     setMessages(r.messages ?? []);
   }, []);
 
+  const startThreadsPollAfterSync = useCallback(() => {
+    if (syncPollRef.current) {
+      clearInterval(syncPollRef.current);
+      syncPollRef.current = null;
+    }
+    let ticks = 0;
+    syncPollRef.current = setInterval(async () => {
+      ticks += 1;
+      try {
+        await loadThreads();
+      } catch {
+        /* ignorar */
+      }
+      if (ticks >= 45) {
+        if (syncPollRef.current) clearInterval(syncPollRef.current);
+        syncPollRef.current = null;
+      }
+    }, 3000);
+  }, [loadThreads]);
+
   useEffect(() => {
     loadAccounts();
   }, [loadAccounts]);
@@ -85,9 +103,6 @@ export default function InboxPage() {
 
   useEffect(() => {
     if (!accountId) return;
-    const key = `inbox_auto_sync_${accountId}`;
-    const last = Number(sessionStorage.getItem(key) || "0");
-    if (Date.now() - last < INBOX_AUTO_SYNC_COOLDOWN_MS) return;
     let cancelled = false;
     (async () => {
       const { data } = await supabase.auth.getSession();
@@ -95,11 +110,12 @@ export default function InboxPage() {
       if (!token || cancelled) return;
       try {
         setBgSync(true);
+        setSyncNote((prev) => prev ?? "Sincronización automática al entrar (cola del worker)…");
         await api<{ task_id?: string; deduped?: boolean }>("/inbox/sync", token, {
           method: "POST",
           body: JSON.stringify({ account_id: accountId, background: true }),
         });
-        sessionStorage.setItem(key, String(Date.now()));
+        if (!cancelled) startThreadsPollAfterSync();
       } catch {
         /* cola / red: la lista igual muestra lo ya guardado */
       } finally {
@@ -109,7 +125,7 @@ export default function InboxPage() {
     return () => {
       cancelled = true;
     };
-  }, [accountId]);
+  }, [accountId, startThreadsPollAfterSync]);
 
   useEffect(() => {
     if (selected) loadThreadMessages(selected);
@@ -140,24 +156,14 @@ export default function InboxPage() {
       setSyncNote(
         "Actualizando con LinkedIn en segundo plano. La lista se refresca sola cada pocos segundos."
       );
-      let ticks = 0;
-      syncPollRef.current = setInterval(async () => {
-        ticks += 1;
-        try {
-          await loadThreads();
-        } catch {
-          /* ignorar hasta que la API vuelva */
-        }
-        if (ticks >= 40) {
-          if (syncPollRef.current) clearInterval(syncPollRef.current);
-          syncPollRef.current = null;
-          setSyncNote((prev) =>
-            prev
-              ? `${prev} Si sigue vacío: revisa Tareas (errores del worker) y la consola del worker «[inbox_sync]».`
-              : null
-          );
-        }
-      }, 3000);
+      startThreadsPollAfterSync();
+      setTimeout(() => {
+        setSyncNote((prev) =>
+          prev
+            ? `${prev} Si sigue vacío: revisa Tareas (errores del worker) y la consola del worker «[inbox_sync]».`
+            : null
+        );
+      }, 135_000);
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e));
     } finally {
@@ -204,8 +210,8 @@ export default function InboxPage() {
             ) : null}
           </div>
           <p className="mt-1 text-xs text-[var(--muted)]">
-            Lo que ya guardó el worker se muestra al entrar. Al abrir esta página pedimos una sync en segundo plano
-            (sin duplicar si ya hay una en cola).
+            Cada vez que entras aquí se encola una sincronización con LinkedIn (el backend evita duplicar si ya hay una
+            pendiente). La lista se refresca sola mientras el worker termina.
           </p>
           {lastMessageAt && (
             <p className="mt-1 text-[10px] text-[var(--muted)]">
