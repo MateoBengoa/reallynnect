@@ -311,7 +311,6 @@ async function readLastMessageRow(
 ): Promise<{ text: string; direction: "in" | "out" } | null> {
   await scrollThreadMessageListToBottom(page);
 
-  type RowRead = { text: string; direction: "in" | "out" } | null;
   const scoped = (await page.evaluate((hint: string | null) => {
     const norm = (s: string) => s.replace(/\s+/g, " ").trim();
     const nameOnly = (text: string, peer: string | null): boolean => {
@@ -368,7 +367,7 @@ async function readLastMessageRow(
     const t = bodyOf(last);
     if (!t) return null;
     return { text: t.slice(0, 4000), direction: fromSelf(last) ? "out" : "in" };
-  }, peerNameHint ?? null)) as RowRead;
+  }, peerNameHint ?? null)) as { text: string; direction: "in" | "out" } | null;
 
   if (scoped) return scoped;
 
