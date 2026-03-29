@@ -1,16 +1,22 @@
 "use client";
 
+import dynamic from "next/dynamic";
 import { useCallback, useEffect, useState } from "react";
 import { getValidAccessToken } from "@/lib/supabase";
 import { api } from "@/lib/api";
+import type { WorkflowStep } from "@/components/CampaignWorkflowEditor";
+
+const CampaignWorkflowEditor = dynamic(
+  () => import("@/components/CampaignWorkflowEditor").then((m) => ({ default: m.CampaignWorkflowEditor })),
+  {
+    ssr: false,
+    loading: () => (
+      <div className="min-h-[360px] animate-pulse rounded-xl border border-white/10 bg-white/[0.03]" aria-hidden />
+    ),
+  }
+);
 
 type Campaign = { id: string; name: string; status: string };
-type Step = {
-  id?: string;
-  step_type: string;
-  delay_hours: number;
-  message_template: string | null;
-};
 
 const STEP_TYPES = [
   "visit_profile",
@@ -25,14 +31,16 @@ const STEP_TYPES = [
   "inmail",
 ] as const;
 
+const DEFAULT_STEPS: WorkflowStep[] = [
+  { step_type: "visit_profile", delay_hours: 0, message_template: "Hola {name}" },
+  { step_type: "connect", delay_hours: 48, message_template: "" },
+];
+
 export default function CampaignsPage() {
   const [campaigns, setCampaigns] = useState<Campaign[]>([]);
   const [name, setName] = useState("");
   const [selected, setSelected] = useState<string | null>(null);
-  const [steps, setSteps] = useState<Step[]>([
-    { step_type: "visit_profile", delay_hours: 0, message_template: "Hola {name}" },
-    { step_type: "connect", delay_hours: 48, message_template: "" },
-  ]);
+  const [steps, setSteps] = useState<WorkflowStep[]>(DEFAULT_STEPS);
 
   const load = useCallback(async () => {
     if (!(await getValidAccessToken())) return;
@@ -46,8 +54,8 @@ export default function CampaignsPage() {
 
   async function loadSteps(id: string) {
     if (!(await getValidAccessToken())) return;
-    const r = await api<{ steps: Step[] }>(`/campaigns/${id}/steps`);
-    if (r.steps?.length) setSteps(r.steps);
+    const r = await api<{ steps: WorkflowStep[] }>(`/campaigns/${id}/steps`);
+    setSteps(r.steps?.length ? r.steps : DEFAULT_STEPS);
     setSelected(id);
   }
 
@@ -59,18 +67,20 @@ export default function CampaignsPage() {
     await load();
   }
 
+  function stepsPayload() {
+    return steps.map((s) => ({
+      step_type: s.step_type,
+      delay_hours: s.delay_hours,
+      message_template: s.message_template || undefined,
+    }));
+  }
+
   async function saveSteps() {
     if (!selected) return;
     if (!(await getValidAccessToken())) return;
     await api(`/campaigns/${selected}/steps`, {
       method: "PUT",
-      body: JSON.stringify({
-        steps: steps.map((s) => ({
-          step_type: s.step_type,
-          delay_hours: s.delay_hours,
-          message_template: s.message_template || undefined,
-        })),
-      }),
+      body: JSON.stringify({ steps: stepsPayload() }),
     });
     alert("Pasos guardados");
   }
@@ -80,13 +90,7 @@ export default function CampaignsPage() {
     if (!(await getValidAccessToken())) return;
     await api(`/campaigns/${selected}/steps`, {
       method: "PUT",
-      body: JSON.stringify({
-        steps: steps.map((s) => ({
-          step_type: s.step_type,
-          delay_hours: s.delay_hours,
-          message_template: s.message_template || undefined,
-        })),
-      }),
+      body: JSON.stringify({ steps: stepsPayload() }),
     });
     const r = await api<{
       leads: number;
@@ -114,6 +118,10 @@ export default function CampaignsPage() {
   return (
     <div>
       <h1 className="mb-4 text-2xl font-semibold">Campañas</h1>
+      <p className="mb-4 max-w-2xl text-sm text-[var(--muted)]">
+        Diseña el flujo como secuencia de bloques. Arrastra para reordenar; el backend ejecuta los pasos en orden fijo
+        (sin ramas «si responde» en esta versión).
+      </p>
       <form onSubmit={create} className="mb-6 flex max-w-md gap-2">
         <input
           className="flex-1 rounded border border-white/10 bg-[var(--surface)] px-2 py-1.5"
@@ -125,8 +133,8 @@ export default function CampaignsPage() {
           Crear
         </button>
       </form>
-      <div className="grid gap-6 lg:grid-cols-2">
-        <ul className="space-y-1">
+      <div className="flex flex-col gap-6 lg:flex-row lg:items-start">
+        <ul className="shrink-0 space-y-1 lg:w-56">
           {campaigns.map((c) => (
             <li key={c.id}>
               <button
@@ -139,55 +147,16 @@ export default function CampaignsPage() {
             </li>
           ))}
         </ul>
-        <div className="rounded-xl border border-white/10 bg-[var(--surface)] p-4">
-          <p className="mb-2 text-sm text-[var(--muted)]">Pasos (orden = secuencia)</p>
-          {steps.map((s, i) => (
-            <div key={i} className="mb-3 grid gap-2 border-b border-white/5 pb-3 sm:grid-cols-2">
-              <select
-                className="rounded border border-white/10 bg-[var(--bg)] px-2 py-1 text-sm"
-                value={s.step_type}
-                onChange={(e) => {
-                  const n = [...steps];
-                  n[i] = { ...n[i], step_type: e.target.value };
-                  setSteps(n);
-                }}
-              >
-                {STEP_TYPES.map((t) => (
-                  <option key={t} value={t}>
-                    {t}
-                  </option>
-                ))}
-              </select>
-              <input
-                type="number"
-                className="rounded border border-white/10 bg-[var(--bg)] px-2 py-1 text-sm"
-                value={s.delay_hours}
-                onChange={(e) => {
-                  const n = [...steps];
-                  n[i] = { ...n[i], delay_hours: Number(e.target.value) };
-                  setSteps(n);
-                }}
-              />
-              <input
-                className="sm:col-span-2 rounded border border-white/10 bg-[var(--bg)] px-2 py-1 text-xs"
-                placeholder="Plantilla mensaje ({name})"
-                value={s.message_template ?? ""}
-                onChange={(e) => {
-                  const n = [...steps];
-                  n[i] = { ...n[i], message_template: e.target.value };
-                  setSteps(n);
-                }}
-              />
-            </div>
-          ))}
-          <div className="mt-2 flex flex-wrap gap-2">
-            <button type="button" className="rounded bg-white/10 px-3 py-1.5 text-sm" onClick={saveSteps} disabled={!selected}>
+        <div className="min-w-0 flex-1 space-y-3">
+          <CampaignWorkflowEditor steps={steps} setSteps={setSteps} stepTypes={STEP_TYPES} />
+          <div className="flex flex-wrap gap-2">
+            <button type="button" className="rounded-lg bg-white/10 px-3 py-1.5 text-sm" onClick={saveSteps} disabled={!selected}>
               Guardar pasos
             </button>
-            <button type="button" className="rounded bg-[var(--accent)] px-3 py-1.5 text-sm text-white" onClick={start} disabled={!selected}>
+            <button type="button" className="rounded-lg bg-[var(--accent)] px-3 py-1.5 text-sm text-white" onClick={start} disabled={!selected}>
               Iniciar
             </button>
-            <button type="button" className="rounded border border-white/20 px-3 py-1.5 text-sm" onClick={pause} disabled={!selected}>
+            <button type="button" className="rounded-lg border border-white/20 px-3 py-1.5 text-sm" onClick={pause} disabled={!selected}>
               Pausar
             </button>
           </div>
