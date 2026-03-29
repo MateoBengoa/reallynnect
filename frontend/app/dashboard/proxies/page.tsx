@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { supabase } from "@/lib/supabase";
+import { getValidAccessToken } from "@/lib/supabase";
 import { api } from "@/lib/api";
 
 type Proxy = {
@@ -22,10 +22,8 @@ export default function ProxiesPage() {
   const [err, setErr] = useState<string | null>(null);
 
   const load = useCallback(async () => {
-    const { data } = await supabase.auth.getSession();
-    const token = data.session?.access_token;
-    if (!token) return;
-    const r = await api<{ proxies: Proxy[] }>("/proxies", token);
+    if (!(await getValidAccessToken())) return;
+    const r = await api<{ proxies: Proxy[] }>("/proxies");
     setList(r.proxies);
   }, []);
 
@@ -36,11 +34,9 @@ export default function ProxiesPage() {
   async function add(e: React.FormEvent) {
     e.preventDefault();
     setErr(null);
-    const { data } = await supabase.auth.getSession();
-    const token = data.session?.access_token;
-    if (!token) return;
+    if (!(await getValidAccessToken())) return;
     try {
-      await api("/proxies", token, {
+      await api("/proxies", {
         method: "POST",
         body: JSON.stringify({
           host,

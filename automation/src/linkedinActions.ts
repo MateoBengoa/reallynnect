@@ -1357,8 +1357,8 @@ export async function sendMessageToOpenProfile(
 }
 
 /** URL de hilo o solo el id (segmento de `/messaging/thread/...`). */
-export function normalizeMessagingThreadInput(raw: string): { threadUrl: string; conversationId: string } {
-  const t = raw.trim();
+export function normalizeMessagingThreadInput(raw: string | null | undefined): { threadUrl: string; conversationId: string } {
+  const t = String(raw ?? "").trim();
   if (!t) return { threadUrl: "", conversationId: "" };
   if (/^https?:\/\//i.test(t)) {
     const noQuery = t.split("?")[0] ?? t;

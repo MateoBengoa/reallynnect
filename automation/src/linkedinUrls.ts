@@ -1,6 +1,6 @@
 /** Convierte entradas de leads (URL parcial, vanity, etc.) en URL de perfil estable. */
-export function normalizeLinkedInProfileUrl(raw: string): string {
-  const s = raw.trim();
+export function normalizeLinkedInProfileUrl(raw: string | null | undefined): string {
+  const s = String(raw ?? "").trim();
   if (!s) return s;
 
   const withHost = (path: string) => {

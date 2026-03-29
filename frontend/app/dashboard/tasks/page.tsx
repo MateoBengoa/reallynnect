@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { supabase } from "@/lib/supabase";
+import { getValidAccessToken } from "@/lib/supabase";
 import { api } from "@/lib/api";
 
 type Task = {
@@ -22,10 +22,8 @@ export default function TasksPage() {
   const [diagErr, setDiagErr] = useState<string | null>(null);
 
   const load = useCallback(async () => {
-    const { data } = await supabase.auth.getSession();
-    const token = data.session?.access_token;
-    if (!token) return;
-    const r = await api<{ tasks: Task[] }>("/tasks", token);
+    if (!(await getValidAccessToken())) return;
+    const r = await api<{ tasks: Task[] }>("/tasks");
     setTasks(r.tasks);
   }, []);
 
@@ -39,13 +37,11 @@ export default function TasksPage() {
     setDiagLoading(true);
     setDiagErr(null);
     try {
-      const { data } = await supabase.auth.getSession();
-      const token = data.session?.access_token;
-      if (!token) {
+      if (!(await getValidAccessToken())) {
         setDiagErr("Sin sesión");
         return;
       }
-      const r = await api<Diagnostics>("/debug/diagnostics", token);
+      const r = await api<Diagnostics>("/debug/diagnostics");
       setDiag(r);
     } catch (e) {
       setDiagErr(e instanceof Error ? e.message : String(e));

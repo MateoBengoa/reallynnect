@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { supabase } from "@/lib/supabase";
+import { getValidAccessToken } from "@/lib/supabase";
 import { api } from "@/lib/api";
 
 type Rule = {
@@ -20,10 +20,8 @@ export default function RulesPage() {
   const [useAi, setUseAi] = useState(false);
 
   const load = useCallback(async () => {
-    const { data } = await supabase.auth.getSession();
-    const token = data.session?.access_token;
-    if (!token) return;
-    const r = await api<{ rules: Rule[] }>("/keyword-rules", token);
+    if (!(await getValidAccessToken())) return;
+    const r = await api<{ rules: Rule[] }>("/keyword-rules");
     setRules(r.rules);
   }, []);
 
@@ -33,10 +31,8 @@ export default function RulesPage() {
 
   async function add(e: React.FormEvent) {
     e.preventDefault();
-    const { data } = await supabase.auth.getSession();
-    const token = data.session?.access_token;
-    if (!token) return;
-    await api("/keyword-rules", token, {
+    if (!(await getValidAccessToken())) return;
+    await api("/keyword-rules", {
       method: "POST",
       body: JSON.stringify({ keyword, reply_template: template, rule_type: ruleType, use_ai: useAi }),
     });
@@ -45,10 +41,8 @@ export default function RulesPage() {
   }
 
   async function remove(id: string) {
-    const { data } = await supabase.auth.getSession();
-    const token = data.session?.access_token;
-    if (!token) return;
-    await api(`/keyword-rules/${id}`, token, { method: "DELETE" });
+    if (!(await getValidAccessToken())) return;
+    await api(`/keyword-rules/${id}`, { method: "DELETE" });
     await load();
   }
 

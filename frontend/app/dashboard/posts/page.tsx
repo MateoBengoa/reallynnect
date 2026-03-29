@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { supabase } from "@/lib/supabase";
+import { getValidAccessToken } from "@/lib/supabase";
 import { api } from "@/lib/api";
 
 type Post = {
@@ -20,10 +20,8 @@ export default function PostsPage() {
   const [scheduleAt, setScheduleAt] = useState("");
 
   const load = useCallback(async () => {
-    const { data } = await supabase.auth.getSession();
-    const token = data.session?.access_token;
-    if (!token) return;
-    const r = await api<{ posts: Post[] }>("/posts", token);
+    if (!(await getValidAccessToken())) return;
+    const r = await api<{ posts: Post[] }>("/posts");
     setPosts(r.posts);
   }, []);
 
@@ -33,10 +31,8 @@ export default function PostsPage() {
 
   async function generate(e: React.FormEvent) {
     e.preventDefault();
-    const { data } = await supabase.auth.getSession();
-    const token = data.session?.access_token;
-    if (!token) return;
-    await api("/posts/generate", token, {
+    if (!(await getValidAccessToken())) return;
+    await api("/posts/generate", {
       method: "POST",
       body: JSON.stringify({ topic, with_image: withImage }),
     });
@@ -46,11 +42,9 @@ export default function PostsPage() {
 
   async function schedule() {
     if (!scheduleId || !scheduleAt) return;
-    const { data } = await supabase.auth.getSession();
-    const token = data.session?.access_token;
-    if (!token) return;
+    if (!(await getValidAccessToken())) return;
     const iso = new Date(scheduleAt).toISOString();
-    await api(`/posts/${scheduleId}/schedule`, token, {
+    await api(`/posts/${scheduleId}/schedule`, {
       method: "POST",
       body: JSON.stringify({ scheduled_time: iso }),
     });

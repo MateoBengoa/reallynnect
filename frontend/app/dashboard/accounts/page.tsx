@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { supabase } from "@/lib/supabase";
+import { getValidAccessToken } from "@/lib/supabase";
 import { api } from "@/lib/api";
 
 type Account = {
@@ -53,10 +53,8 @@ export default function AccountsPage() {
   const syncBaseline = useRef<{ at: string | null; name: string | null } | null>(null);
 
   const load = useCallback(async () => {
-    const { data } = await supabase.auth.getSession();
-    const token = data.session?.access_token;
-    if (!token) return;
-    const r = await api<{ accounts: Account[] }>("/linkedin-accounts", token);
+    if (!(await getValidAccessToken())) return;
+    const r = await api<{ accounts: Account[] }>("/linkedin-accounts");
     setAccounts(r.accounts);
   }, []);
 
@@ -97,9 +95,7 @@ export default function AccountsPage() {
 
   async function syncProfile(accountId: string) {
     setMsg(null);
-    const { data } = await supabase.auth.getSession();
-    const token = data.session?.access_token;
-    if (!token) return;
+    if (!(await getValidAccessToken())) return;
     const acc = accounts.find((x) => x.id === accountId);
     syncBaseline.current = {
       at: acc?.session_verified_at ?? null,
@@ -107,7 +103,7 @@ export default function AccountsPage() {
     };
     setSyncingId(accountId);
     try {
-      await api<{ ok: boolean }>(`/linkedin-accounts/${accountId}/sync-profile`, token, {
+      await api<{ ok: boolean }>(`/linkedin-accounts/${accountId}/sync-profile`, {
         method: "POST",
       });
       setMsg("Sincronización en cola. En unos segundos deberían aparecer nombre, puesto y foto.");
@@ -122,11 +118,9 @@ export default function AccountsPage() {
   async function connect(e: React.FormEvent) {
     e.preventDefault();
     setMsg(null);
-    const { data } = await supabase.auth.getSession();
-    const token = data.session?.access_token;
-    if (!token) return;
+    if (!(await getValidAccessToken())) return;
     try {
-      await api<{ id: string; verify_task_id: string | null }>("/linkedin-accounts", token, {
+      await api<{ id: string; verify_task_id: string | null }>("/linkedin-accounts", {
         method: "POST",
         body: JSON.stringify({ li_at: liAt.trim() }),
       });
@@ -141,10 +135,8 @@ export default function AccountsPage() {
   }
 
   async function remove(id: string) {
-    const { data } = await supabase.auth.getSession();
-    const token = data.session?.access_token;
-    if (!token) return;
-    await api(`/linkedin-accounts/${id}`, token, { method: "DELETE" });
+    if (!(await getValidAccessToken())) return;
+    await api(`/linkedin-accounts/${id}`, { method: "DELETE" });
     await load();
   }
 

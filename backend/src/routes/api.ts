@@ -1,7 +1,7 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { getQueueMode } from "../queues/redisClient.js";
-import { encryptSecret, maskSecret } from "../lib/crypto.js";
+import { decryptSecret, encryptSecret, maskSecret } from "../lib/crypto.js";
 import { createEnrollmentsAndSchedule, scheduleEnrollmentStep } from "../services/campaignEngine.js";
 import { generateImageBytes, generatePost } from "../services/gemini.js";
 import { pickProxyForAccount } from "../services/proxyAssign.js";
@@ -39,6 +39,7 @@ const WORKER_ACTIONS_IMPLEMENTED = new Set([
   "poll_comments",
   "reply_dm",
   "sync_inbox",
+  "sync_inbox_thread",
 ]);
 
 export async function registerApiRoutes(app: FastifyInstance) {
@@ -585,45 +586,77 @@ export async function registerApiRoutes(app: FastifyInstance) {
     if (!ids.length) return { threads: [] };
     const q = req.query as { account_id?: string };
     const filterIds = q.account_id && ids.includes(q.account_id) ? [q.account_id] : ids;
-    const { data: rows, error } = await sb
-      .from("messages")
-      .select("id, account_id, conversation_id, message_text, direction, created_at, peer_name")
+    const { data: convRows, error: convErr } = await sb
+      .from("inbox_conversations")
+      .select(
+        "account_id, conversation_id, peer_name, peer_photo_url, list_preview, updated_at, list_rank, list_last_activity_at"
+      )
       .in("account_id", filterIds)
-      .order("created_at", { ascending: false })
-      .limit(800);
-    if (error) throw error;
-    const list = rows ?? [];
+      .order("updated_at", { ascending: false })
+      .limit(2000);
+    if (convErr) throw convErr;
+    const conversations = convRows ?? [];
     const accName = new Map((accounts ?? []).map((a) => [a.id, a.li_display_name ?? "Cuenta LinkedIn"]));
-    const threadMap = new Map<
-      string,
-      {
-        account_id: string;
-        conversation_id: string;
-        peer_name: string | null;
-        preview: string;
-        last_direction: string;
-        last_at: string;
-        account_label: string;
-      }
-    >();
-    for (const m of list) {
-      const k = `${m.account_id}::${m.conversation_id}`;
-      if (!threadMap.has(k)) {
-        threadMap.set(k, {
-          account_id: m.account_id,
-          conversation_id: m.conversation_id,
-          peer_name: m.peer_name ?? null,
-          preview: (m.message_text ?? "").slice(0, 220),
-          last_direction: m.direction,
-          last_at: m.created_at,
-          account_label: accName.get(m.account_id) ?? m.account_id.slice(0, 8),
-        });
+
+    const convKeys = conversations.map((c) => c.conversation_id);
+    const lastByConv = new Map<string, { direction: string; created_at: string }>();
+    if (convKeys.length > 0) {
+      const { data: msgRows, error: msgErr } = await sb
+        .from("messages")
+        .select("conversation_id, direction, created_at")
+        .in("account_id", filterIds)
+        .in("conversation_id", convKeys)
+        .order("created_at", { ascending: false })
+        .limit(8000);
+      if (msgErr) throw msgErr;
+      for (const m of msgRows ?? []) {
+        if (!lastByConv.has(m.conversation_id)) {
+          lastByConv.set(m.conversation_id, { direction: m.direction, created_at: m.created_at });
+        }
       }
     }
-    const threads = [...threadMap.values()].sort(
-      (a, b) => new Date(b.last_at).getTime() - new Date(a.last_at).getTime()
-    );
-    const last_message_at = list.length > 0 ? list[0].created_at : null;
+
+    const threads = conversations
+      .map((c) => {
+        const last = lastByConv.get(c.conversation_id);
+        const lrRaw = (c as { list_rank?: number | string | null }).list_rank;
+        const lr =
+          lrRaw != null && lrRaw !== "" && Number.isFinite(Number(lrRaw)) ? Number(lrRaw) : null;
+        const listAct = (c as { list_last_activity_at?: string | null }).list_last_activity_at;
+        const cand = [last?.created_at, listAct, c.updated_at].filter(Boolean) as string[];
+        let last_at = (last?.created_at ?? listAct ?? c.updated_at) as string;
+        let maxMs = 0;
+        for (const s of cand) {
+          const ms = new Date(s).getTime();
+          if (!Number.isNaN(ms) && ms >= maxMs) {
+            maxMs = ms;
+            last_at = s;
+          }
+        }
+        return {
+          account_id: c.account_id,
+          conversation_id: c.conversation_id,
+          peer_name: c.peer_name ?? null,
+          peer_photo_url: c.peer_photo_url ?? null,
+          preview: (c.list_preview ?? "—").slice(0, 220),
+          last_direction: last?.direction ?? "in",
+          last_at,
+          list_rank: lr,
+          account_label: accName.get(c.account_id) ?? c.account_id.slice(0, 8),
+        };
+      })
+      .sort((a, b) => {
+        const ta = new Date(a.last_at).getTime();
+        const tb = new Date(b.last_at).getTime();
+        if (tb !== ta) return tb - ta;
+        const ar = a.list_rank;
+        const br = b.list_rank;
+        if (ar != null && br != null && ar !== br) return ar - br;
+        if (ar != null && br == null) return -1;
+        if (ar == null && br != null) return 1;
+        return a.conversation_id.localeCompare(b.conversation_id);
+      });
+    const last_message_at = threads.length > 0 ? threads[0].last_at : null;
     return { threads, last_message_at };
   });
 
@@ -648,6 +681,74 @@ export async function registerApiRoutes(app: FastifyInstance) {
       .limit(250);
     if (error) throw error;
     return { messages: data ?? [] };
+  });
+
+  function isAllowedAttachmentProxyUrl(raw: string): boolean {
+    try {
+      const u = new URL(raw);
+      const h = u.hostname.toLowerCase();
+      return (
+        h === "linkedin.com" ||
+        h.endsWith(".linkedin.com") ||
+        h === "licdn.com" ||
+        h.endsWith(".licdn.com")
+      );
+    } catch {
+      return false;
+    }
+  }
+
+  app.get("/inbox/attachment/proxy", async (req, reply) => {
+    const q = req.query as { account_id?: string; url?: string; filename?: string };
+    if (!q.account_id || !q.url?.trim()) {
+      return reply.status(400).send({ error: "account_id y url son obligatorios" });
+    }
+    let decoded: string;
+    try {
+      decoded = decodeURIComponent(q.url.trim());
+    } catch {
+      return reply.status(400).send({ error: "url inválida" });
+    }
+    if (!decoded.startsWith("https://") || !isAllowedAttachmentProxyUrl(decoded)) {
+      return reply.status(400).send({ error: "URL no permitida (solo dominios LinkedIn / licdn)" });
+    }
+    const { data: acc, error: accErr } = await sb
+      .from("linkedin_accounts")
+      .select("li_at_cookie")
+      .eq("id", q.account_id)
+      .eq("user_id", req.userId!)
+      .maybeSingle();
+    if (accErr || !acc) return reply.status(404).send({ error: "Cuenta no encontrada" });
+    let liAt: string;
+    try {
+      liAt = decryptSecret((acc as { li_at_cookie: string }).li_at_cookie);
+    } catch {
+      return reply.status(500).send({ error: "No se pudo leer la sesión de la cuenta" });
+    }
+    const upstream = await fetch(decoded, {
+      redirect: "follow",
+      headers: {
+        Cookie: `li_at=${liAt}`,
+        Referer: "https://www.linkedin.com/messaging/",
+        "User-Agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+        Accept: "*/*",
+        "Accept-Language": "es-ES,es;q=0.9,en;q=0.8",
+      },
+    });
+    if (!upstream.ok) {
+      return reply.status(502).send({ error: `LinkedIn respondió ${upstream.status}` });
+    }
+    const ct = upstream.headers.get("content-type") ?? "application/octet-stream";
+    reply.header("Content-Type", ct);
+    const cd = upstream.headers.get("content-disposition");
+    if (cd) reply.header("Content-Disposition", cd);
+    else if (q.filename?.trim()) {
+      const safe = q.filename.trim().replace(/["\r\n]/g, "_").slice(0, 180);
+      reply.header("Content-Disposition", `attachment; filename="${safe}"`);
+    }
+    const buf = Buffer.from(await upstream.arrayBuffer());
+    return reply.send(buf);
   });
 
   app.post("/inbox/send", async (req, reply) => {
@@ -684,7 +785,12 @@ export async function registerApiRoutes(app: FastifyInstance) {
 
   app.post("/inbox/sync", async (req, reply) => {
     const body = z
-      .object({ account_id: z.string().uuid(), background: z.boolean().optional() })
+      .object({
+        account_id: z.string().uuid(),
+        background: z.boolean().optional(),
+        /** Cancela sync_inbox pendientes/en curso de esta cuenta y encola una nueva. */
+        force: z.boolean().optional(),
+      })
       .parse(req.body);
     const { data: acc } = await sb
       .from("linkedin_accounts")
@@ -693,6 +799,43 @@ export async function registerApiRoutes(app: FastifyInstance) {
       .eq("user_id", req.userId!)
       .maybeSingle();
     if (!acc) return reply.status(404).send({ error: "Cuenta no encontrada" });
+
+    const failStale = {
+      status: "failed" as const,
+      error_message: "stale_sync_inbox_abandoned",
+      locked_at: null as null,
+    };
+
+    if (body.force) {
+      await sb
+        .from("tasks")
+        .update({ status: "failed", error_message: "force_resync_inbox", locked_at: null })
+        .eq("account_id", body.account_id)
+        .eq("action", "sync_inbox")
+        .in("status", ["pending", "running"]);
+    } else {
+      const staleSec = Number(process.env.INBOX_SYNC_STALE_RUNNING_SEC ?? 20 * 60);
+      if (Number.isFinite(staleSec) && staleSec >= 120) {
+        const staleIso = new Date(Date.now() - staleSec * 1000).toISOString();
+        await sb
+          .from("tasks")
+          .update(failStale)
+          .eq("account_id", body.account_id)
+          .eq("action", "sync_inbox")
+          .eq("status", "running")
+          .not("locked_at", "is", null)
+          .lt("locked_at", staleIso);
+        await sb
+          .from("tasks")
+          .update(failStale)
+          .eq("account_id", body.account_id)
+          .eq("action", "sync_inbox")
+          .eq("status", "running")
+          .is("locked_at", null)
+          .lt("created_at", staleIso);
+      }
+    }
+
     const { data: dupRows } = await sb
       .from("tasks")
       .select("id")
@@ -711,6 +854,48 @@ export async function registerApiRoutes(app: FastifyInstance) {
       payload: {},
     });
     if (!taskId) return reply.status(500).send({ error: "No se pudo encolar la sincronización" });
+    return { ok: true, task_id: taskId, deduped: false };
+  });
+
+  app.post("/inbox/thread/sync", async (req, reply) => {
+    const body = z
+      .object({
+        account_id: z.string().uuid(),
+        conversation_id: z.string().min(1),
+        keywords_auto_reply: z.boolean().optional(),
+      })
+      .parse(req.body);
+    const { data: acc } = await sb
+      .from("linkedin_accounts")
+      .select("id")
+      .eq("id", body.account_id)
+      .eq("user_id", req.userId!)
+      .maybeSingle();
+    if (!acc) return reply.status(404).send({ error: "Cuenta no encontrada" });
+    const convId = body.conversation_id.trim();
+    const { data: dupCandidates } = await sb
+      .from("tasks")
+      .select("id, payload")
+      .eq("account_id", body.account_id)
+      .eq("action", "sync_inbox_thread")
+      .in("status", ["pending", "running"])
+      .order("created_at", { ascending: false })
+      .limit(25);
+    const dup = (dupCandidates ?? []).find(
+      (t) => String((t.payload as { conversation_id?: string } | null)?.conversation_id ?? "").trim() === convId
+    );
+    if (dup?.id) {
+      return { ok: true, task_id: dup.id, deduped: true };
+    }
+    const taskId = await enqueueTask(sb, redis, {
+      account_id: body.account_id,
+      action: "sync_inbox_thread",
+      payload: {
+        conversation_id: convId,
+        keywords_auto_reply: body.keywords_auto_reply ?? false,
+      },
+    });
+    if (!taskId) return reply.status(500).send({ error: "No se pudo encolar la sincronización del hilo" });
     return { ok: true, task_id: taskId, deduped: false };
   });
 

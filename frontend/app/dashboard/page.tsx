@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { supabase } from "@/lib/supabase";
+import { getValidAccessToken } from "@/lib/supabase";
 import { api } from "@/lib/api";
 
 export default function DashboardHome() {
@@ -9,14 +9,12 @@ export default function DashboardHome() {
 
   useEffect(() => {
     (async () => {
-      const { data } = await supabase.auth.getSession();
-      const token = data.session?.access_token;
-      if (!token) return;
+      if (!(await getValidAccessToken())) return;
       try {
         const [a, l, t] = await Promise.all([
-          api<{ accounts: unknown[] }>("/linkedin-accounts", token),
-          api<{ leads: unknown[] }>("/leads", token),
-          api<{ tasks: unknown[] }>("/tasks", token),
+          api<{ accounts: unknown[] }>("/linkedin-accounts"),
+          api<{ leads: unknown[] }>("/leads"),
+          api<{ tasks: unknown[] }>("/tasks"),
         ]);
         setCounts({ accounts: a.accounts.length, leads: l.leads.length, tasks: t.tasks.length });
       } catch {

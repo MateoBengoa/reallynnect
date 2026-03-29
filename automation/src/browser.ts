@@ -58,6 +58,7 @@ export async function createContext(
       : {}),
     proxy: options.proxy,
     ignoreHTTPSErrors: false,
+    acceptDownloads: true,
   });
 
   await context.addInitScript(() => {

@@ -2,25 +2,44 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
-import { supabase } from "@/lib/supabase";
-import { api } from "@/lib/api";
+import { getValidAccessToken } from "@/lib/supabase";
+import { api, apiDownloadBlob } from "@/lib/api";
 
 type LiAccount = { id: string; li_display_name: string | null };
 type Thread = {
   account_id: string;
   conversation_id: string;
   peer_name: string | null;
+  peer_photo_url?: string | null;
   preview: string;
   last_direction: string;
   last_at: string;
   account_label: string;
 };
+type MsgAttachment = { name: string; kind?: string; download_url?: string | null };
+
+async function downloadInboxAttachment(accountId: string, remoteUrl: string, filename: string) {
+  const q =
+    `/inbox/attachment/proxy?account_id=${encodeURIComponent(accountId)}` +
+    `&url=${encodeURIComponent(remoteUrl)}` +
+    `&filename=${encodeURIComponent(filename)}`;
+  const blob = await apiDownloadBlob(q);
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename.replace(/["\r\n]/g, "_").split(/[/\\]/).pop() || "archivo";
+  a.rel = "noopener";
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
 type Msg = {
   id: string;
   message_text: string | null;
   direction: string;
   created_at: string;
   peer_name?: string | null;
+  attachments?: MsgAttachment[] | null;
 };
 
 export default function InboxPage() {
@@ -34,36 +53,34 @@ export default function InboxPage() {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [syncNote, setSyncNote] = useState<string | null>(null);
+  const [threadSyncNote, setThreadSyncNote] = useState<string | null>(null);
   const [bgSync, setBgSync] = useState(false);
   const syncPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const loadAccounts = useCallback(async () => {
-    const { data } = await supabase.auth.getSession();
-    const token = data.session?.access_token;
+    const token = await getValidAccessToken();
     if (!token) return;
-    const r = await api<{ accounts: LiAccount[] }>("/linkedin-accounts", token);
+    const r = await api<{ accounts: LiAccount[] }>("/linkedin-accounts");
     setAccounts(r.accounts ?? []);
     setAccountId((prev) => prev || r.accounts?.[0]?.id || "");
   }, []);
 
   const loadThreads = useCallback(async () => {
-    const { data } = await supabase.auth.getSession();
-    const token = data.session?.access_token;
+    const token = await getValidAccessToken();
     if (!token || !accountId) return;
     const q = `/inbox?account_id=${encodeURIComponent(accountId)}`;
-    const r = await api<{ threads: Thread[]; last_message_at?: string | null }>(q, token);
+    const r = await api<{ threads: Thread[]; last_message_at?: string | null }>(q);
     setThreads(r.threads ?? []);
     setLastMessageAt(r.last_message_at ?? null);
   }, [accountId]);
 
   const loadThreadMessages = useCallback(async (t: Thread) => {
-    const { data } = await supabase.auth.getSession();
-    const token = data.session?.access_token;
+    const token = await getValidAccessToken();
     if (!token) return;
     const q =
       `/inbox/thread?account_id=${encodeURIComponent(t.account_id)}` +
       `&conversation_id=${encodeURIComponent(t.conversation_id)}`;
-    const r = await api<{ messages: Msg[] }>(q, token);
+    const r = await api<{ messages: Msg[] }>(q);
     setMessages(r.messages ?? []);
   }, []);
 
@@ -105,13 +122,12 @@ export default function InboxPage() {
     if (!accountId) return;
     let cancelled = false;
     (async () => {
-      const { data } = await supabase.auth.getSession();
-      const token = data.session?.access_token;
+      const token = await getValidAccessToken();
       if (!token || cancelled) return;
       try {
         setBgSync(true);
-        setSyncNote((prev) => prev ?? "Sincronización automática al entrar (cola del worker)…");
-        await api<{ task_id?: string; deduped?: boolean }>("/inbox/sync", token, {
+        setSyncNote((prev) => prev ?? "Actualizando la lista de conversaciones con LinkedIn (cola del worker)…");
+        await api<{ task_id?: string; deduped?: boolean }>("/inbox/sync", {
           method: "POST",
           body: JSON.stringify({ account_id: accountId, background: true }),
         });
@@ -128,7 +144,54 @@ export default function InboxPage() {
   }, [accountId, startThreadsPollAfterSync]);
 
   useEffect(() => {
-    if (selected) loadThreadMessages(selected);
+    if (!selected) {
+      setThreadSyncNote(null);
+      return;
+    }
+    let cancelled = false;
+    const intervalRef: { current: ReturnType<typeof setInterval> | null } = { current: null };
+    setMessages([]);
+    setThreadSyncNote("Sincronizando mensajes de este chat con el worker…");
+    (async () => {
+      const token = await getValidAccessToken();
+      if (!token || cancelled) return;
+      try {
+        await api<{ task_id?: string; deduped?: boolean }>("/inbox/thread/sync", {
+          method: "POST",
+          body: JSON.stringify({
+            account_id: selected.account_id,
+            conversation_id: selected.conversation_id,
+          }),
+        });
+      } catch {
+        /* red / cola: seguimos haciendo poll por si ya hay datos */
+      }
+      if (cancelled) return;
+      try {
+        await loadThreadMessages(selected);
+      } catch {
+        /* ignorar */
+      }
+      let ticks = 0;
+      intervalRef.current = setInterval(async () => {
+        if (cancelled) return;
+        ticks += 1;
+        try {
+          await loadThreadMessages(selected);
+        } catch {
+          /* ignorar */
+        }
+        if (ticks >= 2) setThreadSyncNote(null);
+        if (ticks >= 36 && intervalRef.current) {
+          clearInterval(intervalRef.current);
+          intervalRef.current = null;
+        }
+      }, 1600);
+    })();
+    return () => {
+      cancelled = true;
+      if (intervalRef.current) clearInterval(intervalRef.current);
+    };
   }, [selected, loadThreadMessages]);
 
   useEffect(() => {
@@ -137,30 +200,50 @@ export default function InboxPage() {
     };
   }, []);
 
-  async function syncNow() {
+  async function syncNow(opts?: { force?: boolean }) {
     setErr(null);
     setSyncNote(null);
     if (syncPollRef.current) {
       clearInterval(syncPollRef.current);
       syncPollRef.current = null;
     }
-    const { data } = await supabase.auth.getSession();
-    const token = data.session?.access_token;
-    if (!token || !accountId) return;
+    if (!(await getValidAccessToken())) {
+      setErr("No hay sesión. Vuelve a iniciar sesión.");
+      return;
+    }
+    if (!accountId) {
+      setErr("No hay cuenta LinkedIn seleccionada. Añade una en Cuentas.");
+      return;
+    }
     setBusy(true);
     try {
-      await api<{ task_id: string }>("/inbox/sync", token, {
+      const res = await api<{ task_id?: string; deduped?: boolean; ok?: boolean; error?: string }>("/inbox/sync", {
         method: "POST",
-        body: JSON.stringify({ account_id: accountId }),
+        body: JSON.stringify({
+          account_id: accountId,
+          ...(opts?.force ? { force: true } : {}),
+        }),
       });
-      setSyncNote(
-        "Actualizando con LinkedIn en segundo plano. La lista se refresca sola cada pocos segundos."
-      );
+      const tid = res.task_id ? `${res.task_id.slice(0, 8)}…` : "";
+      if (res.deduped) {
+        setSyncNote(
+          `Ya hay una sincronización de lista encolada o en curso para esta cuenta (tarea ${tid || "—"}). El worker la ejecuta en Chrome (Playwright). Mira ` +
+            `«Tareas» en el menú si no avanza. Si lleva bloqueada mucho tiempo, pulsa «Forzar nueva sincronización» abajo.`
+        );
+      } else if (opts?.force) {
+        setSyncNote(
+          "Se cancelaron las sync de lista anteriores y se encoló una nueva. El worker la procesará en breve en Chrome."
+        );
+      } else {
+        setSyncNote(
+          "Sincronización de la lista encolada. El worker actualizará nombres y vistas previas en el panel izquierdo; el texto completo de cada chat se carga al abrirlo."
+        );
+      }
       startThreadsPollAfterSync();
       setTimeout(() => {
         setSyncNote((prev) =>
           prev
-            ? `${prev} Si sigue vacío: revisa Tareas (errores del worker) y la consola del worker «[inbox_sync]».`
+            ? `${prev} Si la lista sigue vacía: revisa Tareas y la consola del worker «[inbox_sync]».`
             : null
         );
       }, 135_000);
@@ -175,12 +258,11 @@ export default function InboxPage() {
     e.preventDefault();
     if (!selected || !draft.trim()) return;
     setErr(null);
-    const { data } = await supabase.auth.getSession();
-    const token = data.session?.access_token;
+    const token = await getValidAccessToken();
     if (!token) return;
     setBusy(true);
     try {
-      await api("/inbox/send", token, {
+      await api("/inbox/send", {
         method: "POST",
         body: JSON.stringify({
           account_id: selected.account_id,
@@ -210,12 +292,12 @@ export default function InboxPage() {
             ) : null}
           </div>
           <p className="mt-1 text-xs text-[var(--muted)]">
-            Cada vez que entras aquí se encola una sincronización con LinkedIn (el backend evita duplicar si ya hay una
-            pendiente). La lista se refresca sola mientras el worker termina.
+            Al entrar se actualiza la lista de conversaciones (izquierda) con LinkedIn; no descarga el historial completo
+            de todos los chats. Al abrir un chat, el worker sincroniza las burbujas de ese hilo.
           </p>
           {lastMessageAt && (
             <p className="mt-1 text-[10px] text-[var(--muted)]">
-              Último mensaje en base de datos: {new Date(lastMessageAt).toLocaleString()}
+              Última actividad (lista o mensajes): {new Date(lastMessageAt).toLocaleString()}
             </p>
           )}
           {bgSync && (
@@ -239,10 +321,18 @@ export default function InboxPage() {
           <button
             type="button"
             disabled={busy || !accountId}
-            onClick={syncNow}
+            onClick={() => syncNow()}
             className="mt-2 w-full rounded border border-white/20 py-1.5 text-sm hover:bg-white/5 disabled:opacity-50"
           >
             Sincronizar ahora
+          </button>
+          <button
+            type="button"
+            disabled={busy || !accountId}
+            onClick={() => syncNow({ force: true })}
+            className="mt-1 w-full text-left text-[11px] text-[var(--accent)] underline underline-offset-2 disabled:opacity-50"
+          >
+            Forzar nueva sincronización (cancela la de lista pendiente o en curso)
           </button>
           {syncNote && (
             <p className="mt-2 text-[11px] leading-snug text-[var(--muted)]">{syncNote}</p>
@@ -251,12 +341,12 @@ export default function InboxPage() {
         <div className="min-h-0 flex-1 overflow-y-auto">
           {threads.length === 0 && (
             <p className="p-3 text-sm text-[var(--muted)]">
-              Aún no hay conversaciones en base de datos. Suele llenarse en uno o varios minutos si el worker está en
-              marcha; si no, pulsa «Sincronizar ahora». Si falla la sync, revisa{" "}
+              Aún no hay conversaciones en la lista. Suele llenarse en uno o varios minutos si el worker está en marcha;
+              si no, pulsa «Sincronizar ahora». Si falla, revisa{" "}
               <Link href="/dashboard/tasks" className="text-[var(--accent)] underline underline-offset-2">
                 Tareas
               </Link>{" "}
-              y la consola del worker «[inbox_sync]».
+              y la consola «[inbox_sync]».
             </p>
           )}
           <ul>
@@ -268,13 +358,30 @@ export default function InboxPage() {
                   <button
                     type="button"
                     onClick={() => setSelected(t)}
-                    className={`w-full border-b border-white/5 px-3 py-2 text-left text-sm hover:bg-white/5 ${active ? "bg-white/10" : ""}`}
+                    className={`flex w-full gap-2 border-b border-white/5 px-3 py-2 text-left text-sm hover:bg-white/5 ${active ? "bg-white/10" : ""}`}
                   >
-                    <div className="font-medium">{t.peer_name || t.conversation_id.slice(0, 24)}</div>
-                    <div className="truncate text-xs text-[var(--muted)]">{t.preview || "—"}</div>
-                    <div className="text-[10px] uppercase text-[var(--muted)]">
-                      {t.last_direction === "out" ? "Tú · " : ""}
-                      {new Date(t.last_at).toLocaleString()}
+                    {t.peer_photo_url ? (
+                      // eslint-disable-next-line @next/next/no-img-element
+                      <img
+                        src={t.peer_photo_url}
+                        alt=""
+                        className="mt-0.5 size-9 shrink-0 rounded-full object-cover"
+                        referrerPolicy="no-referrer"
+                        loading="lazy"
+                        onError={(e) => {
+                          (e.target as HTMLImageElement).style.display = "none";
+                        }}
+                      />
+                    ) : (
+                      <div className="mt-0.5 size-9 shrink-0 rounded-full bg-white/10" aria-hidden />
+                    )}
+                    <div className="min-w-0 flex-1">
+                      <div className="font-medium">{t.peer_name || t.conversation_id.slice(0, 24)}</div>
+                      <div className="truncate text-xs text-[var(--muted)]">{t.preview || "—"}</div>
+                      <div className="text-[10px] uppercase text-[var(--muted)]">
+                        {t.last_direction === "out" ? "Tú · " : ""}
+                        {new Date(t.last_at).toLocaleString()}
+                      </div>
                     </div>
                   </button>
                 </li>
@@ -291,27 +398,99 @@ export default function InboxPage() {
           </div>
         ) : (
           <>
-            <div className="border-b border-white/10 px-4 py-3">
-              <h2 className="font-medium">{selected.peer_name || selected.conversation_id}</h2>
-              <p className="text-xs text-[var(--muted)]">{selected.account_label}</p>
+            <div className="flex items-start gap-3 border-b border-white/10 px-4 py-3">
+              {selected.peer_photo_url ? (
+                // eslint-disable-next-line @next/next/no-img-element
+                <img
+                  src={selected.peer_photo_url}
+                  alt=""
+                  className="size-10 shrink-0 rounded-full object-cover"
+                  referrerPolicy="no-referrer"
+                  onError={(e) => {
+                    (e.target as HTMLImageElement).style.display = "none";
+                  }}
+                />
+              ) : null}
+              <div className="min-w-0">
+                <h2 className="font-medium">{selected.peer_name || selected.conversation_id}</h2>
+                <p className="text-xs text-[var(--muted)]">{selected.account_label}</p>
+              </div>
             </div>
             <div className="min-h-0 flex-1 space-y-2 overflow-y-auto p-4 text-sm">
-              {messages.map((m) => (
-                <div
-                  key={m.id}
-                  className={`max-w-[85%] rounded-lg px-3 py-2 ${
-                    m.direction === "out" ? "ml-auto bg-[var(--accent)]/25" : "mr-auto bg-white/5"
-                  }`}
-                >
-                  <pre className="whitespace-pre-wrap font-sans text-sm">
-                    {(m.message_text ?? "").trim() ||
-                      "Sin texto guardado para este mensaje. Vuelve a sincronizar o revisa la consola del worker «[inbox_sync]»."}
-                  </pre>
-                  <div className="mt-1 text-[10px] text-[var(--muted)]">
-                    {new Date(m.created_at).toLocaleString()}
+              {threadSyncNote && (
+                <p className="mb-2 text-xs text-[var(--muted)]">{threadSyncNote}</p>
+              )}
+              {messages.map((m) => {
+                const atts = Array.isArray(m.attachments) ? m.attachments : [];
+                const text = (m.message_text ?? "").trim();
+                const emptyBody = !text && atts.length === 0;
+                return (
+                  <div
+                    key={m.id}
+                    className={`max-w-[85%] rounded-lg px-3 py-2 ${
+                      m.direction === "out" ? "ml-auto bg-[var(--accent)]/25" : "mr-auto bg-white/5"
+                    }`}
+                  >
+                    {text ? (
+                      <pre className="whitespace-pre-wrap font-sans text-sm">{text}</pre>
+                    ) : emptyBody ? (
+                      <p className="font-sans text-sm text-[var(--muted)]">
+                        Sin texto. Espera unos segundos a que termine la sincronización del hilo o revisa Tareas /
+                        consola «[inbox_thread_sync]».
+                      </p>
+                    ) : null}
+                    {atts.length > 0 && (
+                      <ul className={`space-y-1.5 ${text ? "mt-2" : ""}`}>
+                        {atts.map((a, i) => {
+                          const du = a.download_url?.trim();
+                          const liThread = selected
+                            ? `https://www.linkedin.com/messaging/thread/${encodeURIComponent(selected.conversation_id)}/`
+                            : "";
+                          return (
+                            <li
+                              key={`${m.id}-att-${i}`}
+                              className="flex flex-wrap items-center gap-2 rounded border border-white/10 bg-black/25 px-2 py-1.5 text-xs"
+                            >
+                              <span className="shrink-0 text-[var(--muted)]" aria-hidden>
+                                {a.kind === "pdf" ? "PDF" : a.kind ? a.kind.toUpperCase() : "📎"}
+                              </span>
+                              <span className="min-w-0 flex-1 truncate font-medium" title={a.name}>
+                                {a.name}
+                              </span>
+                              {du ? (
+                                <button
+                                  type="button"
+                                  className="shrink-0 rounded bg-white/10 px-2 py-0.5 text-[11px] hover:bg-white/15"
+                                  onClick={() =>
+                                    selected &&
+                                    downloadInboxAttachment(selected.account_id, du, a.name).catch((e) =>
+                                      alert(e instanceof Error ? e.message : String(e))
+                                    )
+                                  }
+                                >
+                                  Descargar
+                                </button>
+                              ) : liThread ? (
+                                <a
+                                  href={liThread}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  className="shrink-0 text-[11px] text-[var(--accent)] underline underline-offset-2"
+                                >
+                                  Abrir en LinkedIn
+                                </a>
+                              ) : null}
+                            </li>
+                          );
+                        })}
+                      </ul>
+                    )}
+                    <div className="mt-1 text-[10px] text-[var(--muted)]">
+                      {new Date(m.created_at).toLocaleString()}
+                    </div>
                   </div>
-                </div>
-              ))}
+                );
+              })}
             </div>
             <form onSubmit={sendMessage} className="border-t border-white/10 p-3">
               {err && <p className="mb-2 text-xs text-red-400">{err}</p>}

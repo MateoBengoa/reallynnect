@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { supabase } from "@/lib/supabase";
+import { getValidAccessToken } from "@/lib/supabase";
 import { api } from "@/lib/api";
 
 type Lead = {
@@ -18,10 +18,8 @@ export default function LeadsPage() {
   const [bulk, setBulk] = useState("");
 
   const load = useCallback(async () => {
-    const { data } = await supabase.auth.getSession();
-    const token = data.session?.access_token;
-    if (!token) return;
-    const r = await api<{ leads: Lead[] }>("/leads", token);
+    if (!(await getValidAccessToken())) return;
+    const r = await api<{ leads: Lead[] }>("/leads");
     setLeads(r.leads);
   }, []);
 
@@ -31,10 +29,8 @@ export default function LeadsPage() {
 
   async function addOne(e: React.FormEvent) {
     e.preventDefault();
-    const { data } = await supabase.auth.getSession();
-    const token = data.session?.access_token;
-    if (!token) return;
-    await api("/leads", token, {
+    if (!(await getValidAccessToken())) return;
+    await api("/leads", {
       method: "POST",
       body: JSON.stringify({ profile_url: url }),
     });
@@ -50,10 +46,8 @@ export default function LeadsPage() {
       .filter(Boolean)
       .filter((u) => u.startsWith("http"));
     if (!urls.length) return;
-    const { data } = await supabase.auth.getSession();
-    const token = data.session?.access_token;
-    if (!token) return;
-    await api("/leads/import", token, {
+    if (!(await getValidAccessToken())) return;
+    await api("/leads/import", {
       method: "POST",
       body: JSON.stringify({ urls }),
     });

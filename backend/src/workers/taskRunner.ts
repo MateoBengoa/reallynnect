@@ -41,6 +41,7 @@ import { advanceEnrollmentAfterStep } from "../services/campaignEngine.js";
 import { generateConnectionMessage, generateDmReply, generateImageBytes } from "../services/gemini.js";
 import { loadProxy, markProxyDegraded, markProxyUsed, pickProxyForAccount } from "../services/proxyAssign.js";
 import { enrichWorkerFailureMessage, startPlaywrightTraceIfConfigured, type TraceController } from "./linkedinRunContext.js";
+import { parseLinkedInInboxListTime } from "../lib/linkedinInboxListTime.js";
 
 const MAX_ATTEMPTS = 5;
 
@@ -92,7 +93,8 @@ function taskDispatchGroup(action: string, enrollmentId: unknown): number {
     return 2;
   if (action === "publish_post") return 2;
   if (action === "warmup_feed") return 4;
-    if (action === "poll_messages" || action === "poll_comments" || action === "sync_inbox") return 10;
+    if (action === "poll_messages" || action === "poll_comments" || action === "sync_inbox" || action === "sync_inbox_thread")
+      return 10;
     if (action === "reply_dm") return 2;
   return 3;
 }
@@ -117,9 +119,9 @@ function inboxEnvInt(name: string, fallback: number): number {
   return Number.isFinite(v) && v > 0 ? Math.floor(v) : fallback;
 }
 
-/** Hilos a abrir por sync_inbox (tras recolectar ids en la lista). */
+/** Máximo de conversaciones a volcar en `inbox_conversations` por sync de lista. */
 function inboxSyncMaxThreads(): number {
-  return inboxEnvInt("INBOX_SYNC_MAX_THREADS", 60);
+  return inboxEnvInt("INBOX_SYNC_MAX_THREADS", 500);
 }
 
 /** Hilos en poll_messages (suele ser menor que sync manual). */
@@ -133,14 +135,21 @@ function inboxPollMessagesMaxThreads(): number {
 function inboxSyncPollMs(maxThreads: number): number {
   const env = Number(process.env.INBOX_SYNC_TIMEOUT_MS);
   if (Number.isFinite(env) && env >= 120_000) return env;
-  const perThread = inboxEnvInt("INBOX_SYNC_MS_PER_THREAD", 4200);
-  return Math.max(360_000, 95_000 + maxThreads * perThread);
+  const perThread = inboxEnvInt("INBOX_SYNC_MS_PER_THREAD", 2100);
+  return Math.max(360_000, 80_000 + maxThreads * perThread);
 }
 
 function inboxPollMessagesPollMs(maxThreads: number): number {
   const base = Number(process.env.POLL_TASK_TIMEOUT_MS ?? 130_000);
-  const perThread = inboxEnvInt("INBOX_SYNC_MS_PER_THREAD", 4200);
+  const perThread = inboxEnvInt("INBOX_SYNC_MS_PER_THREAD", 2100);
   return Math.max(Number.isFinite(base) ? base : 130_000, 110_000 + maxThreads * perThread);
+}
+
+/** Timeout para abrir un hilo y volcar burbujas (sync bajo demanda). */
+function inboxThreadSyncPollMs(): number {
+  const env = Number(process.env.INBOX_THREAD_SYNC_TIMEOUT_MS);
+  if (Number.isFinite(env) && env >= 60_000) return env;
+  return 240_000;
 }
 
 async function extractConversationIdFromMessagingUrl(page: Page): Promise<string | null> {
@@ -158,112 +167,489 @@ async function extractConversationIdFromMessagingUrl(page: Page): Promise<string
 async function extractThreadIdFromMessagingPane(page: Page): Promise<string | null> {
   const scoped = page.locator(".msg-s-message-list, .msg-s-message-list-container, .msg-thread").first();
   if (await scoped.isVisible({ timeout: 2500 }).catch(() => false)) {
-    const id = await scoped
-      .evaluate((root) => {
-        const walk = root.parentElement ?? root;
-        const html = (walk.closest("main") ?? walk).innerHTML;
-        const m = html.match(/\/messaging\/thread\/([^"'\\s<>]+)/i);
-        return m?.[1] ? decodeURIComponent(m[1]) : "";
-      })
-      .catch(() => "");
+    const id = (await scoped
+      .evaluate(
+        `root => {
+          var walk = root.parentElement || root;
+          var main = walk.closest("main");
+          var html = (main && main.innerHTML) || walk.innerHTML || "";
+          var i = html.indexOf("/messaging/thread/");
+          if (i < 0) return "";
+          var rest = html.slice(i + "/messaging/thread/".length);
+          var end = rest.search(/["'\\s<>?#]/);
+          var raw = end < 0 ? rest : rest.slice(0, end);
+          try { return decodeURIComponent(raw); } catch (e) { return raw; }
+        }`
+      )
+      .catch(() => "")) as string;
     if (id) return id;
   }
-  return page
-    .evaluate(() => {
-      const main = document.querySelector("main");
-      const html = main?.innerHTML ?? document.body.innerHTML;
-      const m = html.match(/\/messaging\/thread\/([^"'\\s<>]+)/i);
-      return m?.[1] ? decodeURIComponent(m[1]) : "";
-    })
-    .catch(() => null);
+  const fromMain = (await page
+    .evaluate(
+      `() => {
+        var main = document.querySelector("main");
+        var html = (main && main.innerHTML) || document.body.innerHTML || "";
+        var i = html.indexOf("/messaging/thread/");
+        if (i < 0) return "";
+        var rest = html.slice(i + "/messaging/thread/".length);
+        var end = rest.search(/["'\\s<>?#]/);
+        var raw = end < 0 ? rest : rest.slice(0, end);
+        try { return decodeURIComponent(raw); } catch (e) { return raw; }
+      }`
+    )
+    .catch(() => null)) as string | null;
+  return fromMain || null;
 }
 
-type InboxListRow = { conversationId: string; peerName: string | null; preview: string };
+type InboxListRow = {
+  conversationId: string;
+  peerName: string | null;
+  preview: string;
+  peerPhotoUrl: string | null;
+  /** ISO 8601: fecha/hora del último mensaje según la fila de lista de LinkedIn */
+  lastActivityAtIso?: string | null;
+};
+
+function resolveListRowActivityIso(
+  row: { timeStampRaw?: string; timeStampText?: string },
+  ref: Date
+): string | undefined {
+  const tr = (row.timeStampRaw ?? "").trim();
+  if (tr) {
+    if (/^\d{10,13}$/.test(tr)) {
+      const n = parseInt(tr, 10);
+      const d = new Date(tr.length >= 13 ? n : n * 1000);
+      if (!Number.isNaN(d.getTime())) return d.toISOString();
+    }
+    const d = new Date(tr);
+    if (!Number.isNaN(d.getTime())) return d.toISOString();
+  }
+  const iso = parseLinkedInInboxListTime(String(row.timeStampText ?? ""), ref);
+  return iso ?? undefined;
+}
 
 /** Una sola pasada por el DOM: regex de thread en cada fila (LinkedIn no siempre usa <a visible>). */
 async function extractInboxRowsFromListDom(page: Page, max: number): Promise<InboxListRow[]> {
-  return page.evaluate((maxN) => {
-    const out: InboxListRow[] = [];
-    const seen = new Set<string>();
-    const rowEls: Element[] = [];
-    const threadFrom = (s: string): string => {
-      const m = s.match(/\/messaging\/thread\/([^/?#"'\\s<>]+)/i);
-      if (!m?.[1]) return "";
-      try {
-        return decodeURIComponent(m[1]);
-      } catch {
-        return m[1];
+  try {
+    const raw = await page.evaluate(
+      `maxN => {
+      function threadFrom(s) {
+        if (!s) return "";
+        var i = s.indexOf("/messaging/thread/");
+        if (i < 0) return "";
+        var rest = s.slice(i + "/messaging/thread/".length);
+        var end = rest.search(/["'\\s<>?#]/);
+        var raw = end < 0 ? rest : rest.slice(0, end);
+        try { return decodeURIComponent(raw); } catch (e) { return raw; }
       }
-    };
-    for (const sel of [
-      '[data-view-name="message-list-item"]',
-      '[data-view-name="message-list-item-conversation"]',
-      ".msg-conversation-listitem",
-      ".msg-conversations-container__conversations-list > li",
-      "ul.msg-conversations-container__conversations-list li",
-      'aside [role="listitem"]',
-      "aside li",
-    ]) {
-      document.querySelectorAll(sel).forEach((el) => {
-        if (rowEls.includes(el)) return;
-        if (el.closest(".msg-s-message-list-container")) return;
-        if (el.closest("[data-view-name='message-pane']")) return;
-        rowEls.push(el);
-      });
-    }
-    for (const row of rowEls) {
-      if (out.length >= maxN) break;
-      const html = row.outerHTML;
-      let conversationId = threadFrom(html);
-      if (!conversationId) {
-        const a = row.querySelector("a[href*='/messaging/thread/']") as HTMLAnchorElement | null;
-        if (a?.href) conversationId = threadFrom(a.href);
+      var out = [];
+      var seen = new Set();
+      var rowEls = [];
+      var sels = [
+        '[data-view-name="message-list-item"]',
+        '[data-view-name="message-list-item-conversation"]',
+        ".msg-conversation-listitem",
+        ".msg-conversations-container__conversations-list > li",
+        "ul.msg-conversations-container__conversations-list li",
+        'aside [role="listitem"]',
+        "aside li"
+      ];
+      for (var si = 0; si < sels.length; si++) {
+        document.querySelectorAll(sels[si]).forEach(function (el) {
+          if (rowEls.indexOf(el) >= 0) return;
+          if (el.closest(".msg-s-message-list-container")) return;
+          if (el.closest("[data-view-name='message-pane']")) return;
+          rowEls.push(el);
+        });
       }
-      if (!conversationId) {
-        const attrNodes = row.querySelectorAll("a[href], [data-href], [data-item-id]");
-        for (const node of Array.from(attrNodes)) {
-          if (conversationId) break;
-          for (const attr of ["href", "data-href", "data-item-id"] as const) {
-            const v = node.getAttribute(attr);
-            if (v && v.includes("/messaging/thread/")) {
-              conversationId = threadFrom(v);
-              break;
+      for (var ri = 0; ri < rowEls.length; ri++) {
+        if (out.length >= maxN) break;
+        var row = rowEls[ri];
+        var html = row.outerHTML;
+        var conversationId = threadFrom(html);
+        if (!conversationId) {
+          var a = row.querySelector("a[href*='/messaging/thread/']");
+          if (a && a.href) conversationId = threadFrom(a.href);
+        }
+        if (!conversationId) {
+          var attrNodes = row.querySelectorAll("a[href], [data-href], [data-item-id]");
+          for (var ai = 0; ai < attrNodes.length && !conversationId; ai++) {
+            var node = attrNodes[ai];
+            ["href", "data-href", "data-item-id"].forEach(function (attr) {
+              if (conversationId) return;
+              var v = node.getAttribute(attr);
+              if (v && v.indexOf("/messaging/thread/") >= 0) conversationId = threadFrom(v);
+            });
+          }
+        }
+        if (!conversationId || seen.has(conversationId)) continue;
+        seen.add(conversationId);
+        var nameEl =
+          row.querySelector(".msg-conversation-listitem__participant-names") ||
+          row.querySelector("[class*='participant-names']") ||
+          row.querySelector("h3, .truncate");
+        var nt = nameEl ? (nameEl.textContent != null ? String(nameEl.textContent) : "") : "";
+        var peerName = nt ? nt.replace(/\\s+/g, " ").trim().slice(0, 200) : null;
+        // Intentar extraer solo el texto del snippet (sin nombre ni timestamp)
+        var snippetEl =
+          row.querySelector(".msg-conversation-card__message-snippet") ||
+          row.querySelector("[class*='message-snippet']") ||
+          row.querySelector("[class*='preview']") ||
+          row.querySelector("[class*='snippet']") ||
+          row.querySelector("p[class*='subline']");
+        var preview;
+        if (snippetEl && snippetEl.textContent) {
+          preview = String(snippetEl.textContent).replace(/\\s+/g, " ").trim().slice(0, 300);
+        } else {
+          preview = String(row.textContent != null ? row.textContent : "").replace(/\\s+/g, " ").trim().slice(0, 300);
+        }
+        // Fotos: probar varios atributos de lazy-load de LinkedIn
+        var photo = null;
+        var imgs = row.querySelectorAll("img");
+        for (var ii = 0; ii < imgs.length; ii++) {
+          var imgEl = imgs[ii];
+          var pu = imgEl.getAttribute("data-delayed-url") || imgEl.getAttribute("data-src") || imgEl.getAttribute("src") || "";
+          if (pu.indexOf("http") === 0 && pu.indexOf("data:") !== 0 && pu.indexOf("ghost") < 0) {
+            photo = pu;
+            break;
+          }
+        }
+        if (!photo) {
+          // Intentar picture > source (LinkedIn usa picture element a veces)
+          var src = row.querySelector("picture source");
+          if (src) {
+            var ss = src.getAttribute("srcset") || src.getAttribute("data-srcset") || "";
+            var firstSrc = ss.split(",")[0];
+            if (firstSrc) {
+              var su = firstSrc.trim().split(" ")[0];
+              if (su && su.indexOf("http") === 0) photo = su;
             }
           }
         }
+        out.push({ conversationId: conversationId, peerName: peerName, preview: preview || "—", peerPhotoUrl: photo });
       }
-      if (!conversationId || seen.has(conversationId)) continue;
-      seen.add(conversationId);
-      const nameEl =
-        row.querySelector(".msg-conversation-listitem__participant-names") ||
-        row.querySelector("[class*='participant-names']") ||
-        row.querySelector("h3, .truncate");
-      const peerName = nameEl?.textContent?.replace(/\s+/g, " ").trim().slice(0, 200) || null;
-      const preview = (row.textContent || "")
-        .replace(/\s+/g, " ")
-        .trim()
-        .slice(0, 700);
-      out.push({
-        conversationId,
-        peerName,
-        preview: preview || "—",
-      });
+      return out;
+    }`,
+      max
+    );
+    return Array.isArray(raw) ? (raw as InboxListRow[]) : [];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Filas de la lista en orden visual de LinkedIn (arriba = más reciente): solo `ul.msg-conversations-container__conversations-list > li`.
+ */
+async function extractInboxRowsFromOrderedListDom(page: Page, max: number): Promise<InboxListRow[]> {
+  const ref = new Date();
+  try {
+    const raw = await page.evaluate(
+      `maxN => {
+        function threadFrom(s) {
+          if (!s) return "";
+          var i = s.indexOf("/messaging/thread/");
+          if (i < 0) return "";
+          var rest = s.slice(i + "/messaging/thread/".length);
+          var end = rest.search(/["'\\s<>?#]/);
+          var rawId = end < 0 ? rest : rest.slice(0, end);
+          try { return decodeURIComponent(rawId); } catch (e) { return rawId; }
+        }
+        function normPreview(t) {
+          return (t == null ? "" : String(t)).replace(/\\s+/g, " ").trim();
+        }
+        var ul = document.querySelector("ul.msg-conversations-container__conversations-list");
+        if (!ul) return [];
+        var out = [];
+        var lis = ul.querySelectorAll(":scope > li");
+        for (var i = 0; i < lis.length && out.length < maxN; i++) {
+          var row = lis[i];
+          if (!row.querySelector(".msg-conversation-card, .msg-conversation-listitem")) continue;
+          var html = row.outerHTML;
+          var conversationId = threadFrom(html);
+          if (!conversationId) {
+            var a = row.querySelector("a[href*='/messaging/thread/']");
+            if (a && a.href) conversationId = threadFrom(a.href);
+          }
+          if (!conversationId) {
+            var nodes = row.querySelectorAll("a[href], [data-href]");
+            for (var ai = 0; ai < nodes.length && !conversationId; ai++) {
+              var v = nodes[ai].getAttribute("href") || nodes[ai].getAttribute("data-href");
+              if (v && v.indexOf("/messaging/thread/") >= 0) conversationId = threadFrom(v);
+            }
+          }
+          if (!conversationId) continue;
+          var nameEl =
+            row.querySelector(".msg-conversation-listitem__participant-names") ||
+            row.querySelector("[class*='participant-names']") ||
+            row.querySelector("h3, .truncate");
+          var nt = nameEl ? String(nameEl.textContent || "") : "";
+          var peerName = nt ? nt.replace(/\\s+/g, " ").trim().slice(0, 200) : null;
+          var snippetEl =
+            row.querySelector(".msg-conversation-card__message-snippet") ||
+            row.querySelector("[class*='message-snippet']");
+          var preview = snippetEl
+            ? normPreview(snippetEl.textContent).slice(0, 300)
+            : normPreview(row.textContent).slice(0, 300);
+          var photo = null;
+          var imgs = row.querySelectorAll("img");
+          for (var ii = 0; ii < imgs.length; ii++) {
+            var imgEl = imgs[ii];
+            var pu = imgEl.getAttribute("data-delayed-url") || imgEl.getAttribute("data-src") || imgEl.src || "";
+            if (pu.indexOf("http") === 0 && pu.indexOf("data:") !== 0 && pu.indexOf("ghost") < 0) {
+              photo = pu;
+              break;
+            }
+          }
+          var timeStampRaw = "";
+          var timeStampText = "";
+          var tsEl = row.querySelector(
+            "time.msg-conversation-card__time-stamp, time.msg-conversation-listitem__time-stamp, " +
+            ".msg-conversation-card__time-stamp, .msg-conversation-listitem__time-stamp"
+          );
+          if (tsEl) {
+            timeStampRaw =
+              tsEl.getAttribute("datetime") ||
+              tsEl.getAttribute("data-time") ||
+              (tsEl.closest("[data-time]") && tsEl.closest("[data-time]").getAttribute("data-time")) ||
+              "";
+            timeStampText = normPreview(tsEl.textContent);
+          }
+          if (!timeStampRaw) {
+            var dtn = row.querySelector("[data-time]");
+            if (dtn) timeStampRaw = dtn.getAttribute("data-time") || "";
+          }
+          out.push({
+            conversationId: conversationId,
+            peerName: peerName,
+            preview: preview || "—",
+            peerPhotoUrl: photo,
+            timeStampRaw: timeStampRaw,
+            timeStampText: timeStampText
+          });
+        }
+        return out;
+      }`,
+      max
+    );
+    if (!Array.isArray(raw)) return [];
+    type RawInboxListEvalRow = {
+      conversationId: string;
+      peerName: string | null;
+      preview: string;
+      peerPhotoUrl: string | null;
+      timeStampRaw?: string;
+      timeStampText?: string;
+    };
+    return (raw as RawInboxListEvalRow[]).map((r) => ({
+      conversationId: r.conversationId,
+      peerName: r.peerName,
+      preview: r.preview,
+      peerPhotoUrl: r.peerPhotoUrl,
+      lastActivityAtIso: resolveListRowActivityIso(r, ref) ?? null,
+    }));
+  } catch {
+    return [];
+  }
+}
+
+async function upsertInboxConversationRows(sb: SupabaseClient, accountId: string, rows: InboxListRow[]): Promise<void> {
+  if (!rows.length) return;
+  const now = new Date().toISOString();
+  const payload = rows.map((r) => ({
+    account_id: accountId,
+    conversation_id: r.conversationId,
+    peer_name: r.peerName ?? null,
+    peer_photo_url: r.peerPhotoUrl ?? null,
+    list_preview: (r.preview ?? "—").trim().slice(0, 500) || "—",
+    list_last_activity_at: r.lastActivityAtIso ?? null,
+    updated_at: now,
+  }));
+  const { error } = await sb.from("inbox_conversations").upsert(payload, { onConflict: "account_id,conversation_id" });
+  if (error) console.error("[inbox_sync] upsert inbox_conversations:", error.message);
+}
+
+async function upsertInboxConversationOne(
+  sb: SupabaseClient,
+  accountId: string,
+  row: {
+    conversation_id: string;
+    peer_name?: string | null;
+    peer_photo_url?: string | null;
+    list_preview?: string | null;
+    linkedin_updated_at?: string | null;
+    list_rank?: number | null;
+    list_last_activity_at?: string | null;
+  }
+): Promise<void> {
+  const preview = (row.list_preview ?? "—").trim().slice(0, 500) || "—";
+  const updatedAt = row.linkedin_updated_at ?? new Date().toISOString();
+  const payload: Record<string, unknown> = {
+    account_id: accountId,
+    conversation_id: row.conversation_id,
+    peer_name: row.peer_name ?? null,
+    peer_photo_url: row.peer_photo_url ?? null,
+    list_preview: preview,
+    updated_at: updatedAt,
+  };
+  if (row.list_rank != null && Number.isFinite(row.list_rank)) payload.list_rank = row.list_rank;
+  if (row.list_last_activity_at !== undefined) payload.list_last_activity_at = row.list_last_activity_at;
+  const { error } = await sb.from("inbox_conversations").upsert(payload, { onConflict: "account_id,conversation_id" });
+  if (error) console.error("[inbox_sync] upsert one inbox_conversations:", error.message);
+}
+
+/** Volcado masivo con orden de lista LinkedIn (list_rank 0 = más reciente arriba). */
+async function bulkUpsertInboxConversationsOrdered(
+  sb: SupabaseClient,
+  accountId: string,
+  rows: InboxListRow[],
+  syncBaseTime: number
+): Promise<void> {
+  if (!rows.length) return;
+  const n = rows.length;
+  const chunk = inboxEnvInt("INBOX_BULK_UPSERT_CHUNK", 480);
+  const parallel = Math.min(4, Math.max(1, inboxEnvInt("INBOX_BULK_UPSERT_PARALLEL", 2)));
+
+  const upsertSlice = async (off: number, slice: InboxListRow[]): Promise<void> => {
+    if (!slice.length) return;
+    const payload = slice.map((r, j) => {
+      const i = off + j;
+      const preview = (r.preview ?? "—").trim().slice(0, 500) || "—";
+      return {
+        account_id: accountId,
+        conversation_id: r.conversationId,
+        peer_name: r.peerName ?? null,
+        peer_photo_url: r.peerPhotoUrl ?? null,
+        list_preview: preview,
+        list_rank: i,
+        list_last_activity_at: r.lastActivityAtIso ?? null,
+        updated_at: new Date(syncBaseTime + (n - i) * 2000).toISOString(),
+      };
+    });
+    const { error } = await sb.from("inbox_conversations").upsert(payload, { onConflict: "account_id,conversation_id" });
+    if (error) console.error("[inbox_sync] bulk upsert inbox_conversations:", error.message);
+  };
+
+  for (let off = 0; off < rows.length; off += chunk * parallel) {
+    const batch: Promise<void>[] = [];
+    for (let p = 0; p < parallel; p++) {
+      const start = off + p * chunk;
+      if (start >= rows.length) break;
+      batch.push(upsertSlice(start, rows.slice(start, start + chunk)));
     }
-    return out;
-  }, max);
+    await Promise.all(batch);
+  }
+  console.log(`[inbox_sync] bulk lista ordenada: ${rows.length} conversaciones (list_rank 0…${n - 1})`);
 }
 
 async function extractPeerNameFromMessagingThread(page: Page): Promise<string | null> {
   const loc = page.locator(
     '[data-test-id="conversation-header-name"], .msg-thread__link-to-profile, h2.msg-title-bar__title-bar-title, .msg-entity-lockup__entity-title'
   );
-  const t = await loc.first().innerText().catch(() => "");
+  const t = String((await loc.first().innerText().catch(() => "")) ?? "");
   const line = t.trim().split(/\n/)[0]?.trim();
   return line || null;
 }
 
-function normalizeMsgText(s: string): string {
-  return s.replace(/\s+/g, " ").trim();
+async function extractPeerPhotoUrlFromThread(page: Page): Promise<string | null> {
+  // IMPORTANTE: usar IIFE (function(){ })() — el form () => {} retorna el objeto función sin ejecutar.
+  // Buscar la foto del PEER en el panel derecho del hilo, NO en toda la página
+  // (que también tiene el avatar del usuario en el navbar).
+  const u = await page
+    .evaluate(
+      `(function() {
+        function getImgUrl(el) {
+          if (!el) return "";
+          // Usar .src (propiedad JS, refleja cambios dinámicos) no getAttribute que da el HTML original
+          var u = el.getAttribute("data-delayed-url") || el.getAttribute("data-src") || el.src || "";
+          if (!u || u.indexOf("data:") === 0) return "";
+          if (u.indexOf("http") === 0) return u;
+          return "";
+        }
+        // 1. Primero en el panel del hilo (derecho) — evita confundir con avatares de la lista
+        var panelSels = [
+          ".msg-entity-lockup__entity-image img",
+          ".msg-entity-lockup img",
+          "[data-view-name='message-pane'] .msg-entity-lockup img",
+          ".msg-thread__link-to-profile img",
+          ".msg-thread__top-bar img",
+          "header .msg-entity-lockup img"
+        ];
+        for (var pi = 0; pi < panelSels.length; pi++) {
+          var el = document.querySelector(panelSels[pi]);
+          if (!el) continue;
+          var pu = getImgUrl(el);
+          if (pu && pu.indexOf("media.licdn.com") >= 0) return pu;
+        }
+        // 2. Buscar en el panel del hilo específicamente (no toda la página)
+        var pane = document.querySelector(
+          "[data-view-name='message-pane'], .scaffold-layout__detail, .msg-thread, .msg-overlay-conversation-bubble"
+        );
+        if (pane) {
+          var paneImgs = pane.querySelectorAll("img");
+          for (var pi2 = 0; pi2 < paneImgs.length; pi2++) {
+            var img = paneImgs[pi2];
+            if (img.naturalWidth > 0 && img.src && img.src.indexOf("media.licdn.com") >= 0) return img.src;
+          }
+        }
+        return "";
+      })()`
+    )
+    .then((v) => String(v ?? "").trim())
+    .catch(() => "");
+  return u || null;
+}
+
+function normalizeMsgText(s: string | null | undefined): string {
+  return (s ?? "").replace(/\s+/g, " ").trim();
+}
+
+function looksLikeLinkedInThreadDump(s: string): boolean {
+  return (
+    /ha enviado (el siguiente|los siguientes) mensaje/i.test(s) ||
+    /\bVer el perfil de\b/i.test(s) ||
+    /\bMeet meet\.google/i.test(s)
+  );
+}
+
+/**
+ * LinkedIn concatena toda la conversación en innerText: quita chrome y deja el último cuerpo útil.
+ */
+function extractLastBubbleFromLinkedInDump(raw: string): string {
+  const lines = raw
+    .replace(/\r/g, "\n")
+    .split("\n")
+    .map((l) => l.trim())
+    .filter(Boolean);
+  const skipLine = (t: string) => {
+    if (/^Ver el perfil de\b/i.test(t)) return true;
+    if (/ha enviado (el siguiente|los siguientes) mensajes?\b/i.test(t)) return true;
+    if (/^\d{1,2}\s+[A-Za-zÁÉÍÓÚáéíóúñÑ]{3,15}\s+\d{4}$/.test(t)) return true;
+    if (/^Meet meet\.google/i.test(t)) return true;
+    if (t === "Descargar" || t === "Meet") return true;
+    if (/^Reaccionar con\b/i.test(t)) return true;
+    if (/^\d+(\.\d+)?\s*(KB|MB|GB)\b/i.test(t)) return true;
+    if (/^https:\/\/meet\.google\.com\//i.test(t)) return true;
+    return false;
+  };
+  const kept = lines.filter((l) => !skipLine(l));
+  let joined = kept.join(" ");
+  const timeSplits = joined.split(/\b\d{1,2}:\d{2}\b/);
+  const tail = timeSplits.length > 1 ? timeSplits[timeSplits.length - 1]!.trim() : joined;
+  let out = tail.length >= 12 ? tail : joined;
+  out = out.replace(/^[\wÀ-ÿ\s,.'´`-]{2,90}?\s+(?=[¡¿"'(A-Z0-9])/u, "").trim();
+  return normalizeMsgText(out).slice(0, 4000);
+}
+
+/** Texto listo para guardar en `messages` (evita volcados de accesibilidad de LinkedIn). */
+function sanitizeForInboxDb(raw: string): string {
+  const n = normalizeMsgText(raw);
+  if (n.length < 3) return n;
+  if (looksLikeLinkedInThreadDump(n) || n.length > 900) {
+    const extracted = extractLastBubbleFromLinkedInDump(raw);
+    if (extracted.length >= 8) return extracted;
+  }
+  return n.slice(0, 8000);
 }
 
 async function scrollThreadMessageListToBottom(page: Page): Promise<void> {
@@ -273,105 +659,411 @@ async function scrollThreadMessageListToBottom(page: Page): Promise<void> {
     )
     .first();
   if (await list.isVisible({ timeout: 5000 }).catch(() => false)) {
-    await list
-      .evaluate((el) => {
-        el.scrollTop = el.scrollHeight;
-      })
-      .catch(() => {});
+    await list.evaluate(`el => { el.scrollTop = el.scrollHeight; }`).catch(() => {});
   }
   await page.keyboard.press("End").catch(() => {});
   await new Promise((r) => setTimeout(r, 450));
 }
 
-/**
- * InMail / patrocinado: no hay burbujas estándar; tomar texto visible del panel (sin caja de envío).
- */
-async function readMessagingPaneFallback(page: Page): Promise<{ text: string; direction: "in" | "out" } | null> {
-  const raw = await page
-    .evaluate(() => {
-      const pane =
-        document.querySelector("[data-view-name='message-pane']") ||
-        document.querySelector(".msg-s-message-list-container") ||
-        document.querySelector(".msg-thread");
-      if (!pane) return "";
-      const el = pane as HTMLElement;
-      const clone = el.cloneNode(true) as HTMLElement;
-      clone.querySelectorAll("form, .msg-form, [role='textbox'], textarea, button").forEach((n) => n.remove());
-      return (clone.innerText || "").replace(/\s+/g, " ").trim().slice(0, 8000);
-    })
-    .catch(() => "");
-  const t = normalizeMsgText(raw);
-  if (t.length < 2) return null;
-  return { text: t.slice(0, 4000), direction: "in" };
+async function scrollThreadMessageListLoadOlder(page: Page): Promise<void> {
+  const list = page
+    .locator(
+      ".msg-s-message-list-container, ul.msg-s-message-list, .msg-s-message-list, [class*='msg-s-message-list']"
+    )
+    .first();
+  if (!(await list.isVisible({ timeout: 4000 }).catch(() => false))) return;
+  await list.evaluate(`el => { el.scrollTop = 0; }`).catch(() => {});
+  await new Promise((r) => setTimeout(r, 350));
+  const rounds = inboxEnvInt("INBOX_THREAD_SCROLL_UP_ROUNDS", 18);
+  for (let i = 0; i < rounds; i++) {
+    await list.evaluate(`el => { el.scrollTop = Math.max(0, el.scrollTop - 700); }`).catch(() => {});
+    await new Promise((r) => setTimeout(r, 140));
+  }
+  await scrollThreadMessageListToBottom(page);
 }
 
-async function readLastMessageRow(
+type ThreadBubbleAttachment = { name: string; kind?: string; download_url?: string };
+
+async function enrichBubblesWithAttachmentDownloadUrls(
   page: Page,
-  peerNameHint?: string | null
-): Promise<{ text: string; direction: "in" | "out" } | null> {
-  await scrollThreadMessageListToBottom(page);
+  bubbles: { attachments?: ThreadBubbleAttachment[] }[]
+): Promise<void> {
+  let totalAtt = 0;
+  for (const b of bubbles) totalAtt += b.attachments?.length ?? 0;
+  if (totalAtt === 0) return;
 
-  const scoped = (await page.evaluate((hint: string | null) => {
-    const norm = (s: string) => s.replace(/\s+/g, " ").trim();
-    const nameOnly = (text: string, peer: string | null): boolean => {
-      const t = norm(text);
-      if (!t) return true;
-      const p = norm(peer ?? "");
-      if (p && t === p) return true;
-      if (p && t.startsWith(p) && t.length <= p.length + 24) {
-        const rest = norm(t.slice(p.length));
-        if (!rest || /^[·•\d:,\/\s\-–]+$/.test(rest)) return true;
+  const panel = page.locator(".msg-s-message-list-container, ul.msg-s-message-list").first();
+  if (!(await panel.isVisible({ timeout: 4000 }).catch(() => false))) return;
+
+  const buttons = panel.locator("button.msg-s-event-listitem__download-attachment-button");
+  const btnCount = await buttons.count().catch(() => 0);
+  if (btnCount === 0) return;
+
+  const flatSlots: { b: number; a: number }[] = [];
+  for (let bi = 0; bi < bubbles.length; bi++) {
+    const ats = bubbles[bi].attachments;
+    if (!ats?.length) continue;
+    for (let ai = 0; ai < ats.length; ai++) flatSlots.push({ b: bi, a: ai });
+  }
+
+  const maxClicks = Math.min(btnCount, flatSlots.length, inboxEnvInt("INBOX_THREAD_ATTACHMENT_URL_MAX", 15));
+  for (let i = 0; i < maxClicks; i++) {
+    let url = "";
+    try {
+      const respPromise = page
+        .waitForResponse(
+          (r) => {
+            const u = r.url();
+            if (!u.startsWith("https://")) return false;
+            if (!u.includes("licdn.com") && !u.includes("linkedin.com")) return false;
+            const ct = (r.headers()["content-type"] ?? "").toLowerCase();
+            return ct.includes("pdf") || ct.includes("octet-stream") || ct.includes("msword") || ct.includes("officedocument");
+          },
+          { timeout: 14_000 }
+        )
+        .catch(() => null);
+      const dlPromise = page.waitForEvent("download", { timeout: 14_000 }).catch(() => null);
+      await buttons.nth(i).click({ timeout: 5000 }).catch(() => {});
+      const [dl, resp] = await Promise.all([dlPromise, respPromise]);
+      if (dl) {
+        url = dl.url();
+        await dl.cancel().catch(() => {});
+      } else if (resp && resp.ok()) {
+        url = resp.url();
       }
+    } catch {
+      /* ignorar */
+    }
+    if (url && url.startsWith("http") && !url.startsWith("blob:")) {
+      const slot = flatSlots[i];
+      const list = bubbles[slot.b].attachments;
+      if (list && list[slot.a]) list[slot.a].download_url = url;
+    }
+  }
+}
+
+function previewFromBubble(b: { text: string; attachments?: ThreadBubbleAttachment[] }): string {
+  const t = sanitizeForInboxDb(b.text).trim();
+  const att = (b.attachments ?? [])
+    .map((a) => `📎 ${a.name}`)
+    .join(" ");
+  if (t && att) return `${t.slice(0, 140)} · ${att}`.slice(0, 220);
+  if (t) return t.slice(0, 220);
+  if (att) return att.slice(0, 220);
+  return "—";
+}
+
+async function extractAllThreadBubblesFromDom(page: Page): Promise<
+  { text: string; direction: "in" | "out"; attachments?: ThreadBubbleAttachment[] }[]
+> {
+  // IMPORTANTE: page.evaluate con string de arrow function retorna el objeto función (no serializable).
+  // Usar siempre IIFE (function(){ ... })() para que se ejecute y devuelva el valor.
+  try {
+  const raw = await page.evaluate(`(function() {
+    function norm(s) { return (s == null ? "" : String(s)).replace(/\\s+/g, " ").trim(); }
+    function classStr(el) {
+      if (!el) return "";
+      var cn = el.className;
+      if (typeof cn === "string") return cn;
+      if (cn && typeof cn.baseVal === "string") return cn.baseVal;
+      try { return cn != null ? String(cn) : ""; } catch (e) { return ""; }
+    }
+    function inConvList(el) {
+      return el.closest(".msg-conversations-container__conversations-list, ul.msg-conversations-container__conversations-list") !== null;
+    }
+    // DOM real LinkedIn (2025–2026): div.msg-s-event-listitem con data-view-name="message-list-item".
+    // --other = mensaje del contacto (in); sin --other en ese div = mensaje propio (out).
+    function fromSelf(eventListItem) {
+      if (!eventListItem) return false;
+      var cls = classStr(eventListItem);
+      if (cls.indexOf("msg-s-event-listitem--other") >= 0) return false;
+      if (/msg-s-event-listitem/.test(cls)) return true;
+      var inner = eventListItem.querySelector(".msg-s-event-listitem");
+      if (inner && classStr(inner).indexOf("msg-s-event-listitem--other") < 0) return true;
       return false;
-    };
-
-    const root =
-      document.querySelector(".msg-s-message-list-container") ||
-      document.querySelector("ul.msg-s-message-list") ||
-      document.querySelector(".msg-s-message-list");
-    if (!root) return null;
-
-    const nodes = Array.from(
-      root.querySelectorAll(
-        ".msg-s-event-listitem, li.msg-s-message-list__event, [data-view-name='message-list-item-event']"
-      )
-    ).filter((el) => el.closest(".msg-conversations-container__conversations-list") === null);
-
-    const bodyOf = (item: Element): string => {
-      const prefer = item.querySelector(
-        "[class*='msg-s-event-listitem__message-body'], [class*='message-body'], .msg-s-message-group__message, p.msg-s-message-group__text"
+    }
+    function extractMsgText(eventItem) {
+      // En HTML guardado de LinkedIn el texto va en p.msg-s-event-listitem__body (no __message-body)
+      var bodyEl = eventItem.querySelector(
+        "p.msg-s-event-listitem__body, p.msg-s-event-listitem__message-body, " +
+        "[class*='msg-s-event-listitem__body'], .msg-s-event__content p, " +
+        ".msg-s-event-listitem__message-bubble p, [class*='message-body']"
       );
-      const t = norm((prefer?.textContent || item.textContent || "") as string);
-      return t;
-    };
-
-    const fromSelf = (item: Element): boolean => {
-      const cls = item.className?.toString?.() ?? "";
-      return /from-myself|from-me|my-message|msg-s-message-group--my-message/i.test(cls) ||
-        item.querySelector(".msg-s-message-group--my-message, [class*='message-from-me']") !== null;
-    };
-
-    const n = nodes.length;
-    if (n < 1) return null;
-
-    const maxBack = Math.min(8, n);
-    for (let back = 1; back <= maxBack; back++) {
-      const item = nodes[n - back] as HTMLElement;
-      const text = bodyOf(item);
-      if (!text) continue;
-      if (nameOnly(text, hint)) continue;
-      return { text: text.slice(0, 4000), direction: fromSelf(item) ? "out" : "in" };
+      if (bodyEl) return norm(bodyEl.textContent || "");
+      var firstP = eventItem.querySelector(".msg-s-event__content p, .msg-s-event-listitem__message-bubble p");
+      if (firstP) return norm(firstP.textContent || "");
+      return "";
+    }
+    // Adjuntos: p.ui-attachment__filename dentro de .msg-s-event-listitem__download-attachment-button / .ui-attachment--pdf|doc|…
+    function extractAttachments(eventItem) {
+      var out = [];
+      var seen = {};
+      var fnameEls = eventItem.querySelectorAll("p.ui-attachment__filename");
+      for (var fi = 0; fi < fnameEls.length; fi++) {
+        var name = norm(fnameEls[fi].textContent || "");
+        if (name.length < 2) continue;
+        if (seen[name]) continue;
+        seen[name] = true;
+        var wrap = fnameEls[fi].closest(".ui-attachment, .msg-s-event-listitem__attachment-type");
+        var kind = "";
+        if (wrap) {
+          var m = classStr(wrap).match(/ui-attachment--([a-z0-9_-]+)/i);
+          if (m) kind = m[1];
+        }
+        out.push({ name: name.slice(0, 500), kind: kind || undefined });
+      }
+      return out;
     }
 
-    const last = nodes[n - 1] as HTMLElement;
-    const t = bodyOf(last);
-    if (!t) return null;
-    return { text: t.slice(0, 4000), direction: fromSelf(last) ? "out" : "in" };
-  }, peerNameHint ?? null)) as { text: string; direction: "in" | "out" } | null;
+    // 1. Buscar el contenedor raíz del hilo de mensajes (NO la lista de conversaciones)
+    var threadRoots = [
+      ".msg-s-message-list-container",
+      "ul.msg-s-message-list",
+      ".msg-s-message-list",
+      "[data-view-name='message-thread-scroll-container']",
+      "[data-view-name='message-pane']",
+      ".scaffold-layout__detail",
+      ".msg-thread"
+    ];
+    var root = null;
+    for (var ri = 0; ri < threadRoots.length; ri++) {
+      var r = document.querySelector(threadRoots[ri]);
+      if (r && !inConvList(r)) { root = r; break; }
+    }
+    if (!root) {
+      var detailInner = document.querySelector(".scaffold-layout__detail-inner");
+      root = (detailInner && !inConvList(detailInner)) ? detailInner : null;
+    }
+    // Fallback solo si ningún contenedor específico fue encontrado
+    if (!root) root = document.querySelector("main") || document.body;
 
-  if (scoped) return scoped;
+    // 2. Ítems de mensaje: priorizar data-view-name="message-list-item" (coincide con HTML exportado)
+    var itemSelectors = [
+      "[data-view-name='message-list-item'].msg-s-event-listitem",
+      "div.msg-s-event-listitem[data-view-name='message-list-item']",
+      "[data-view-name='message-list-item']",
+      "li.msg-s-message-list__event",
+      "li[class*='msg-s-message-list__event']",
+      ".msg-s-event-listitem",
+      "[data-view-name='message-list-item-event']",
+      "[data-view-name='message-event']"
+    ];
+    var items = [];
+    for (var si = 0; si < itemSelectors.length; si++) {
+      var found = Array.prototype.slice.call(root.querySelectorAll(itemSelectors[si])).filter(function(el) { return !inConvList(el); });
+      if (found.length > 0) { items = found; break; }
+    }
 
-  return readMessagingPaneFallback(page);
+    // 3. Si no se encontraron ítems con selectores específicos, buscar por estructura
+    if (items.length === 0) {
+      // Buscar li o div que contengan p con texto de mensaje o adjunto
+      items = Array.prototype.slice.call(root.querySelectorAll("li, div[class*='event'], div[class*='message']")).filter(function(el) {
+        if (inConvList(el)) return false;
+        if (el.querySelector("p.ui-attachment__filename")) return true;
+        var ps = el.querySelectorAll("p");
+        for (var pi = 0; pi < ps.length; pi++) {
+          if (norm(ps[pi].textContent || "").length >= 3) return true;
+        }
+        return false;
+      });
+    }
+
+    // 4. Texto, adjuntos y dirección (no deduplicar por texto)
+    var out = [];
+    for (var i = 0; i < items.length; i++) {
+      var item = items[i];
+      var bubbleRoot = item.matches && item.matches(".msg-s-event-listitem") ? item : item.querySelector(".msg-s-event-listitem");
+      var t = extractMsgText(item);
+      var atts = extractAttachments(item);
+      if (t.length < 2 && atts.length === 0) continue;
+      var self = fromSelf(bubbleRoot || item);
+      out.push({
+        text: t.slice(0, 8000),
+        direction: self ? "out" : "in",
+        attachments: atts.length ? atts : undefined
+      });
+    }
+    return out;
+  })()`);
+  return Array.isArray(raw)
+    ? (raw as { text: string; direction: "in" | "out"; attachments?: ThreadBubbleAttachment[] }[])
+    : [];
+  } catch (e) {
+    console.warn("[inbox_thread_sync] extractAllThreadBubblesFromDom:", e instanceof Error ? e.message : String(e));
+    return [];
+  }
+}
+
+type DmRuleRow = { id: string; keyword: string; reply_template: string | null; use_ai: boolean };
+
+async function runMessagingThreadSync(
+  page: Page,
+  sb: SupabaseClient,
+  accountId: string,
+  userId: string,
+  conversationId: string,
+  opts: { keywordsAutoReply: boolean }
+): Promise<void> {
+  const url = `https://www.linkedin.com/messaging/thread/${encodeURIComponent(conversationId)}/`;
+  // 'load' espera el JS inicial; los mensajes se cargan después con XHR
+  await page.goto(url, { waitUntil: "load", timeout: 55_000 }).catch(() =>
+    page.goto(url, { waitUntil: "domcontentloaded", timeout: 55_000 })
+  );
+  await new Promise((r) => setTimeout(r, 1000));
+  // Esperar hasta que aparezca al menos un elemento de mensaje en el DOM
+  await page
+    .waitForFunction(
+      `(function() {
+        var sels = [
+          "[data-view-name='message-list-item']",
+          ".msg-s-event-listitem",
+          "li.msg-s-message-list__event",
+          "[data-view-name='message-list-item-event']",
+          "[data-view-name='message-event']",
+          "li[class*='msg-s-message-list__event']"
+        ];
+        for (var i = 0; i < sels.length; i++) {
+          if (document.querySelector(sels[i])) return true;
+        }
+        return false;
+      })()`
+    , { timeout: 20_000 })
+    .catch(() => {});
+  await new Promise((r) => setTimeout(r, 800));
+  await scrollThreadMessageListLoadOlder(page);
+  await new Promise((r) => setTimeout(r, inboxEnvInt("INBOX_THREAD_DOM_SETTLE_MS", 1500)));
+  let bubbles = await extractAllThreadBubblesFromDom(page);
+  console.log(`[inbox_thread_sync] thread=${conversationId.slice(0, 14)}… burbujas_intento1=${bubbles.length}`);
+  if (bubbles.length < 2) {
+    // Diagnóstico: listar qué contenedores y elementos existen en el DOM del hilo
+    const dbgInfo = await page.evaluate(`(function() {
+      var candidates = [
+        ".msg-s-message-list-container", ".msg-s-message-list", ".msg-thread",
+        "[data-view-name='message-thread-scroll-container']", "[data-view-name='message-pane']",
+        ".scaffold-layout__detail", "main"
+      ];
+      var found = [];
+      for (var i = 0; i < candidates.length; i++) {
+        var el = document.querySelector(candidates[i]);
+        if (el) {
+          var li = el.querySelectorAll("li").length;
+          var art = el.querySelectorAll("article").length;
+          var p = el.querySelectorAll("p").length;
+          found.push(candidates[i] + "(li=" + li + ",art=" + art + ",p=" + p + ")");
+        }
+      }
+      var msgSItems = document.querySelectorAll("[class*='msg-s']");
+      var msgClasses = [];
+      for (var mi = 0; mi < Math.min(5, msgSItems.length); mi++) {
+        var cn = msgSItems[mi].className;
+        msgClasses.push(typeof cn === "string" ? cn.split(" ")[0] : "?");
+      }
+      return "url=" + window.location.href.slice(-40) + " | found=" + found.join(";") + " | msg-s-classes=" + msgClasses.join(",");
+    })()`).catch(() => "eval-err");
+    console.log("[inbox_thread_sync] DOM diagnóstico:", dbgInfo);
+    await new Promise((r) => setTimeout(r, 1500));
+    bubbles = await extractAllThreadBubblesFromDom(page);
+    console.log(`[inbox_thread_sync] thread=${conversationId.slice(0, 14)}… burbujas_intento2=${bubbles.length}`);
+  }
+
+  await enrichBubblesWithAttachmentDownloadUrls(page, bubbles);
+
+  const peerName = (await extractPeerNameFromMessagingThread(page))?.trim() || null;
+  const peerPhotoUrl = await extractPeerPhotoUrlFromThread(page);
+  const lastBubble = bubbles.length ? bubbles[bubbles.length - 1] : null;
+  const listPreview = lastBubble ? previewFromBubble(lastBubble) : "—";
+  await upsertInboxConversationOne(sb, accountId, {
+    conversation_id: conversationId,
+    peer_name: peerName,
+    peer_photo_url: peerPhotoUrl,
+    list_preview: listPreview,
+  });
+
+  const baseTs = Date.now() - Math.max(0, bubbles.length - 1) * inboxEnvInt("INBOX_THREAD_MESSAGE_STEP_MS", 60_000);
+  const stepMs = inboxEnvInt("INBOX_THREAD_MESSAGE_STEP_MS", 60_000);
+  const rows = bubbles
+    .map((b, idx) => {
+      const text = sanitizeForInboxDb(b?.text).trim();
+      const attachments =
+        Array.isArray(b.attachments) && b.attachments.length > 0 ? b.attachments : null;
+      if (!text && !attachments?.length) return null;
+      return {
+        account_id: accountId,
+        conversation_id: conversationId,
+        message_text: text ? text.slice(0, 8000) : null,
+        attachments,
+        direction: b.direction,
+        peer_name: peerName,
+        peer_photo_url: peerPhotoUrl,
+        created_at: new Date(baseTs + idx * stepMs).toISOString(),
+      };
+    })
+    .filter(Boolean) as Record<string, unknown>[];
+
+  if (rows.length === 0) {
+    console.warn(
+      `[inbox_thread_sync] thread=${conversationId.slice(0, 12)}… sin burbujas persistibles; se mantiene messages existente`
+    );
+    return;
+  }
+
+  const { error: delErr } = await sb.from("messages").delete().eq("account_id", accountId).eq("conversation_id", conversationId);
+  if (delErr) {
+    console.error("[inbox_thread_sync] delete messages:", delErr.message);
+    throw new Error(delErr.message);
+  }
+
+  const { error: insErr } = await sb.from("messages").insert(rows);
+  if (insErr) {
+    console.error("[inbox_thread_sync] insert messages:", insErr.message);
+    throw new Error(insErr.message);
+  }
+  console.log(`[inbox_thread_sync] thread=${conversationId.slice(0, 12)}… burbujas=${rows.length}`);
+
+  if (!opts.keywordsAutoReply || !rows.length) return;
+  const { data: rulesRaw } = await sb.from("keyword_rules").select("*").eq("user_id", userId).eq("rule_type", "dm");
+  const rules = (rulesRaw ?? []) as DmRuleRow[];
+  if (!rules.length) return;
+  const lastIn = [...bubbles].reverse().find((b) => b?.direction === "in");
+  if (!lastIn) return;
+  let body = sanitizeForInboxDb(lastIn?.text).trim();
+  const attNames = (lastIn.attachments ?? []).map((a) => a.name).filter(Boolean);
+  if (attNames.length) body = body ? `${body} ${attNames.join(" ")}` : attNames.join(" ");
+  if (!body) return;
+  const lower = body.toLowerCase();
+  for (const rule of rules) {
+    if (!rule.keyword || !lower.includes(String(rule.keyword).toLowerCase())) continue;
+    const { data: dup } = await sb
+      .from("dm_autoreply_sent")
+      .select("rule_id")
+      .eq("account_id", accountId)
+      .eq("conversation_id", conversationId)
+      .eq("rule_id", rule.id)
+      .maybeSingle();
+    if (dup) break;
+    let reply = (rule.reply_template ?? "").replace(/\{name\}/gi, "there");
+    if (rule.use_ai && process.env.GEMINI_API_KEY) {
+      reply = await generateDmReply(rule.keyword, body);
+    }
+    if (!reply.trim()) continue;
+    const box = page.locator(".msg-form__contenteditable, div[role='textbox']").first();
+    if (!(await box.isVisible({ timeout: 4000 }).catch(() => false))) break;
+    await box.click({ timeout: 5000 }).catch(() => {});
+    await box.fill(reply.slice(0, 4000));
+    await page
+      .getByRole("button", { name: /^send$|^enviar$|^enviar ahora$/i })
+      .first()
+      .click({ timeout: 6000 })
+      .catch(() => {});
+    await new Promise((r) => setTimeout(r, 2000));
+    await insertChatRowIfFresh(sb, accountId, conversationId, reply, "out", { rule_id: rule.id });
+    await sb.from("dm_autoreply_sent").insert({
+      account_id: accountId,
+      conversation_id: conversationId,
+      rule_id: rule.id,
+    });
+    break;
+  }
 }
 
 async function insertChatRowIfFresh(
@@ -380,10 +1072,10 @@ async function insertChatRowIfFresh(
   conversationId: string,
   messageText: string,
   direction: "in" | "out",
-  extra?: { peer_name?: string | null; rule_id?: string | null }
-) {
-  const trimmed = messageText.trim();
-  if (!trimmed) return;
+  extra?: { peer_name?: string | null; rule_id?: string | null; peer_photo_url?: string | null }
+): Promise<boolean> {
+  const trimmed = (messageText ?? "").trim();
+  if (!trimmed) return false;
   const since = new Date(Date.now() - 4 * 3600 * 1000).toISOString();
   const { data: existing } = await sb
     .from("messages")
@@ -395,7 +1087,7 @@ async function insertChatRowIfFresh(
     .gte("created_at", since)
     .limit(1)
     .maybeSingle();
-  if (existing) return;
+  if (existing) return false;
   await sb.from("messages").insert({
     account_id: accountId,
     conversation_id: conversationId,
@@ -403,33 +1095,9 @@ async function insertChatRowIfFresh(
     direction,
     peer_name: extra?.peer_name ?? null,
     rule_id: extra?.rule_id ?? null,
+    peer_photo_url: extra?.peer_photo_url ?? null,
   });
-}
-
-type DmRuleRow = { id: string; keyword: string; reply_template: string; use_ai: boolean };
-
-/** Enlaces visibles tras hidratar la lista (mejor que un solo evaluate al inicio). */
-async function collectMessagingThreadUrlsFromAnchors(page: Page, max: number): Promise<string[]> {
-  const seen = new Set<string>();
-  const out: string[] = [];
-  const anchors = page.locator('a[href*="/messaging/thread/"]');
-  const n = await anchors.count();
-  for (let i = 0; i < n && out.length < max; i++) {
-    let href = (await anchors.nth(i).getAttribute("href"))?.trim() ?? "";
-    if (!href) continue;
-    if (href.startsWith("/")) href = `https://www.linkedin.com${href}`;
-    href = (href.split("?")[0] ?? href).split("#")[0] ?? href;
-    const m = href.match(/^(https?:\/\/[^/]+\/messaging\/thread\/[^/?#]+)/i);
-    if (!m?.[1]) continue;
-    const idm = m[1].match(/\/messaging\/thread\/([^/?#]+)/i);
-    if (!idm?.[1]) continue;
-    const id = decodeURIComponent(idm[1]);
-    if (seen.has(id)) continue;
-    seen.add(id);
-    const base = m[1];
-    out.push(base.endsWith("/") ? base : `${base}/`);
-  }
-  return out;
+  return true;
 }
 
 async function scrollMessagingConversationList(page: Page): Promise<void> {
@@ -439,7 +1107,7 @@ async function scrollMessagingConversationList(page: Page): Promise<void> {
   const first = scrollers.first();
   if (await first.isVisible({ timeout: 3500 }).catch(() => false)) {
     for (let s = 0; s < 7; s++) {
-      await first.evaluate((node) => node.scrollBy(0, 900)).catch(() => {});
+      await first.evaluate(`node => { node.scrollBy(0, 900); }`).catch(() => {});
       await new Promise((r) => setTimeout(r, 120));
     }
   }
@@ -451,16 +1119,41 @@ async function scrollMessagingConversationList(page: Page): Promise<void> {
 
 /** Un paso de scroll en la lista izquierda (virtualización de LinkedIn). */
 async function scrollMessagingListOneStep(page: Page): Promise<void> {
+  const delta = inboxEnvInt("INBOX_LIST_SCROLL_DELTA_PX", 1020);
   const first = page
     .locator(
       ".msg-conversations-container__conversations-list, [data-view-name='message-list'], aside .scaffold-layout__list, ul.msg-conversations-container__conversations-list"
     )
     .first();
   if (await first.isVisible({ timeout: 2000 }).catch(() => false)) {
-    await first.evaluate((node) => node.scrollBy(0, 720)).catch(() => {});
+    await first.evaluate(
+      (node: HTMLElement, d: number) => {
+        node.scrollBy(0, d);
+      },
+      delta
+    ).catch(() => {});
   } else {
-    await page.mouse.wheel(0, 520).catch(() => {});
+    await page.mouse.wheel(0, Math.min(640, delta)).catch(() => {});
   }
+}
+
+/** LinkedIn virtualiza la lista: hay que desplazar hasta que exista el índice `zeroBasedIndex`. */
+async function ensureConversationListHasNthRow(page: Page, sel: string, zeroBasedIndex: number): Promise<number> {
+  const need = zeroBasedIndex + 1;
+  const maxSteps = inboxEnvInt("INBOX_LIST_ENSURE_MAX_STEPS", 48);
+  const stepPause = inboxEnvInt("INBOX_LIST_ENSURE_STEP_MS", 75);
+  let n = await page.locator(sel).count().catch(() => 0);
+  let stagnant = 0;
+  for (let r = 0; r < maxSteps && n < need; r++) {
+    await scrollMessagingListOneStep(page);
+    await new Promise((res) => setTimeout(res, stepPause));
+    const n2 = await page.locator(sel).count().catch(() => 0);
+    if (n2 <= n) stagnant += 1;
+    else stagnant = 0;
+    n = n2;
+    if (stagnant >= inboxEnvInt("INBOX_LIST_ENSURE_STAGNANT_MAX", 7)) break;
+  }
+  return n;
 }
 
 /**
@@ -468,16 +1161,26 @@ async function scrollMessagingListOneStep(page: Page): Promise<void> {
  * o se alcance el tope (LinkedIn solo monta un subconjunto de filas en el DOM).
  */
 async function collectInboxRowsWithScroll(page: Page, maxThreads: number): Promise<InboxListRow[]> {
-  const collectCap = inboxEnvInt("INBOX_LIST_COLLECT_CAP", 220);
-  const scrollRounds = inboxEnvInt("INBOX_LIST_SCROLL_ROUNDS", 45);
+  const collectCap = Math.min(2000, Math.max(maxThreads, inboxEnvInt("INBOX_LIST_COLLECT_CAP", 1200)));
+  const scrollRounds = inboxEnvInt("INBOX_LIST_SCROLL_ROUNDS", 55);
   const stableNeeded = inboxEnvInt("INBOX_LIST_SCROLL_STABLE_ROUNDS", 5);
-  const pauseMs = inboxEnvInt("INBOX_LIST_SCROLL_PAUSE_MS", 140);
-  const extractMax = Math.min(500, collectCap + 80);
+  const pauseMs = inboxEnvInt("INBOX_LIST_SCROLL_PAUSE_MS", 72);
+  const burstSteps = inboxEnvInt("INBOX_LIST_SCROLL_BURST_STEPS", 2);
+  const burstGapMs = inboxEnvInt("INBOX_LIST_SCROLL_BURST_GAP_MS", 28);
+  const extractMax = Math.min(2500, collectCap + 200);
+
+  await page
+    .evaluate(
+      `() => { var u = document.querySelector("ul.msg-conversations-container__conversations-list"); if (u) u.scrollTop = 0; }`
+    )
+    .catch(() => {});
+  await new Promise((r) => setTimeout(r, inboxEnvInt("INBOX_LIST_AFTER_SCROLL_TOP_MS", 160)));
 
   const byId = new Map<string, InboxListRow>();
   const order: string[] = [];
 
   const merge = (batch: InboxListRow[]): boolean => {
+    if (!Array.isArray(batch)) return false;
     for (const r of batch) {
       if (byId.has(r.conversationId)) continue;
       byId.set(r.conversationId, r);
@@ -489,238 +1192,380 @@ async function collectInboxRowsWithScroll(page: Page, maxThreads: number): Promi
 
   let stable = 0;
   for (let round = 0; round < scrollRounds; round++) {
-    const batch = await extractInboxRowsFromListDom(page, extractMax);
+    const batch = await extractInboxRowsFromOrderedListDom(page, extractMax);
     const before = order.length;
     if (merge(batch)) break;
+    // Ya tenemos las N conversaciones que el sync va a volcar: no seguir scrolleando.
+    if (order.length >= maxThreads) break;
     if (order.length === before) stable += 1;
     else stable = 0;
     if (stable >= stableNeeded) break;
-    await scrollMessagingListOneStep(page);
+    const steps = Math.max(1, burstSteps);
+    for (let b = 0; b < steps; b++) {
+      await scrollMessagingListOneStep(page);
+      if (b < steps - 1) await new Promise((r) => setTimeout(r, burstGapMs));
+    }
     await new Promise((r) => setTimeout(r, pauseMs));
   }
 
   const slice = order.slice(0, maxThreads).map((id) => byId.get(id)!);
   console.log(
-    `[inbox_sync] ids únicos en lista (scroll): ${order.length}, a procesar: ${slice.length} (maxThreads=${maxThreads})`
+    `[inbox_sync] ids únicos en lista (scroll ordenado): ${order.length}, volcando: ${slice.length} (maxThreads=${maxThreads})`
   );
   return slice;
 }
 
-async function ingestCurrentMessagingThread(
-  page: Page,
-  sb: SupabaseClient,
-  accountId: string,
-  rules: DmRuleRow[],
-  keywordsAutoReply: boolean,
-  peerNameHint?: string | null
-): Promise<void> {
-  let conversationId = (await extractConversationIdFromMessagingUrl(page)) ?? "";
-  if (!conversationId) {
-    conversationId = (await extractThreadIdFromMessagingPane(page)) ?? "";
-  }
-  if (!conversationId) return;
-  await page
-    .locator(".msg-s-message-list-container, .msg-s-message-list, .msg-thread, main")
-    .first()
-    .waitFor({ state: "visible", timeout: 12000 })
-    .catch(() => {});
-  const peerFromHeader = await extractPeerNameFromMessagingThread(page);
-  const peerName = peerFromHeader?.trim() || peerNameHint?.trim() || null;
-  const hintForBody = peerName;
-  let lastRow = await readLastMessageRow(page, hintForBody);
-  if (!lastRow) {
-    await new Promise((r) => setTimeout(r, 1500));
-    lastRow = await readLastMessageRow(page, hintForBody);
-  }
-  if (lastRow) {
-    console.log(
-      `[inbox_sync] ingest thread=${conversationId.slice(0, 10)}… dir=${lastRow.direction} chars=${lastRow.text.length}`
-    );
-    await insertChatRowIfFresh(sb, accountId, conversationId, lastRow.text, lastRow.direction, {
-      peer_name: peerName,
-    });
-  } else {
-    console.log(`[inbox_sync] ingest thread=${conversationId.slice(0, 10)}… sin texto de mensaje (selectores/DOM)`);
-  }
-  if (keywordsAutoReply && rules.length && lastRow && lastRow.direction === "in") {
-    const lower = lastRow.text.toLowerCase();
-    for (const rule of rules) {
-      if (!rule.keyword || !lower.includes(String(rule.keyword).toLowerCase())) continue;
-      const { data: dup } = await sb
-        .from("dm_autoreply_sent")
-        .select("rule_id")
-        .eq("account_id", accountId)
-        .eq("conversation_id", conversationId)
-        .eq("rule_id", rule.id)
-        .maybeSingle();
-      if (dup) break;
-      let reply = rule.reply_template.replace(/\{name\}/gi, "there");
-      if (rule.use_ai && process.env.GEMINI_API_KEY) {
-        reply = await generateDmReply(rule.keyword, lastRow.text);
-      }
-      const box = page.locator(".msg-form__contenteditable, div[role='textbox']").first();
-      if (!(await box.isVisible({ timeout: 4000 }).catch(() => false))) break;
-      await box.click({ timeout: 5000 }).catch(() => {});
-      await box.fill(reply.slice(0, 4000));
-      await page
-        .getByRole("button", { name: /^send$|^enviar$|^enviar ahora$/i })
-        .first()
-        .click({ timeout: 6000 })
-        .catch(() => {});
-      await new Promise((r) => setTimeout(r, 2000));
-      await insertChatRowIfFresh(sb, accountId, conversationId, reply, "out", { rule_id: rule.id });
-      await sb.from("dm_autoreply_sent").insert({
-        account_id: accountId,
-        conversation_id: conversationId,
-        rule_id: rule.id,
-      });
-      break;
-    }
-  }
-}
-
-/** Selectors for conversation list rows (sidebar). */
+/**
+ * Selectores de filas de la lista de conversaciones (misma lista para contar y para clic).
+ * Orden: más específicos primero. Evitar `aside ul li` (coge navegación, no chats).
+ */
 const CONV_ROW_SELECTORS = [
+  ".msg-conversations-container__conversations-list > li",
+  "ul.msg-conversations-container__conversations-list li",
   '[data-view-name="message-list-item"]',
   '[data-view-name="message-list-item-conversation"]',
   ".msg-conversation-listitem",
-  ".msg-conversations-container__conversations-list > li",
-  "ul.msg-conversations-container__conversations-list li",
   'aside li[class*="conversation"]',
-  'aside ul li',
 ] as const;
 
-async function getConvRowCount(page: Page): Promise<number> {
+/** Un solo selector activo: el primero con al menos una fila (count y clic deben coincidir). */
+async function resolveConversationRowSelector(page: Page): Promise<string | null> {
   for (const sel of CONV_ROW_SELECTORS) {
     const n = await page.locator(sel).count().catch(() => 0);
-    if (n > 0) return n;
+    if (n > 0) {
+      console.log(`[inbox_sync] lista conversaciones selector=${sel.slice(0, 50)}… filas=${n}`);
+      return sel;
+    }
   }
-  return 0;
+  return null;
 }
 
-async function clickConvRow(page: Page, selectorIndex: number, rowIndex: number): Promise<boolean> {
-  for (const sel of CONV_ROW_SELECTORS) {
-    const loc = page.locator(sel).nth(rowIndex);
-    const ok = await loc.isVisible({ timeout: 3000 }).catch(() => false);
-    if (!ok) continue;
-    await loc.scrollIntoViewIfNeeded({ timeout: 5000 }).catch(() => {});
-    await loc.click({ timeout: 12_000, force: true }).catch(async () => {
-      await loc.click({ timeout: 8_000 }).catch(() => {});
-    });
-    return true;
-  }
-  return false;
+async function clickConvRow(page: Page, rowSelector: string, rowIndex: number): Promise<boolean> {
+  const loc = page.locator(rowSelector).nth(rowIndex);
+  const ok = await loc.isVisible({ timeout: 4000 }).catch(() => false);
+  if (!ok) return false;
+  await loc.scrollIntoViewIfNeeded({ timeout: 6000 }).catch(() => {});
+  await loc.click({ timeout: 14_000, force: true }).catch(async () => {
+    await loc.click({ timeout: 10_000 }).catch(() => {});
+  });
+  return true;
 }
 
 async function runMessagingInboxSync(
   page: Page,
   sb: SupabaseClient,
   accountId: string,
-  userId: string,
-  opts: { keywordsAutoReply: boolean; maxThreads: number }
+  _userId: string,
+  opts: { maxThreads: number }
 ): Promise<void> {
+  // Estrategia principal: scroll + extracción ordenada desde ul.msg-conversations-container__conversations-list
+  // (HTML vivo suele incluir /messaging/thread/… en outerHTML o en <a href>).
+  // Fallback: clic por fila si no hay suficientes ids en DOM (umbral INBOX_SYNC_BULK_MIN_ROWS).
+
+  // Usar viewport ancho (≥1300px) para forzar el modo split-view de LinkedIn,
+  // donde el panel de lista y el panel del hilo coexisten (permite extraer foto del header).
+  await page.setViewportSize({ width: 1536, height: 864 }).catch(() => {});
+
   await page.goto("https://www.linkedin.com/messaging/", { waitUntil: "domcontentloaded", timeout: 60000 });
-  await new Promise((r) => setTimeout(r, 2000));
-  await page.locator("main, .application-outlet, aside").first().waitFor({ state: "visible", timeout: 25000 }).catch(() => {});
-  await new Promise((r) => setTimeout(r, 1000));
+  await new Promise((r) => setTimeout(r, inboxEnvInt("INBOX_PAGE_SETTLE_MS", 900)));
+  await page
+    .locator("main, .application-outlet, aside")
+    .first()
+    .waitFor({ state: "visible", timeout: 25000 })
+    .catch(() => {});
+  await new Promise((r) => setTimeout(r, inboxEnvInt("INBOX_AFTER_MAIN_VISIBLE_MS", 400)));
 
-  const { data: rulesRaw } = opts.keywordsAutoReply
-    ? await sb.from("keyword_rules").select("*").eq("user_id", userId).eq("rule_type", "dm")
-    : { data: [] as DmRuleRow[] };
-  const rules = (rulesRaw ?? []) as DmRuleRow[];
-
-  // — Ruta rápida: IDs ya en el DOM (LinkedIn antiguo / algunos navegadores) —
-  await scrollMessagingConversationList(page);
-  let domRows = await collectInboxRowsWithScroll(page, opts.maxThreads);
-  if (domRows.length === 0) {
-    await new Promise((r) => setTimeout(r, 800));
-    domRows = await collectInboxRowsWithScroll(page, opts.maxThreads);
+  // Scroll + extracción ordenada (misma pasada): recorre la lista como en LinkedIn y obtiene thread ids del HTML vivo.
+  const orderedRows = await collectInboxRowsWithScroll(page, opts.maxThreads);
+  if (orderedRows.length > 0) {
+    await bulkUpsertInboxConversationsOrdered(sb, accountId, orderedRows, Date.now());
   }
-
-  if (domRows.length > 0) {
-    console.log(`[inbox_sync] ruta rápida DOM: ${domRows.length} hilos`);
-    for (const row of domRows) {
-      const url = `https://www.linkedin.com/messaging/thread/${encodeURIComponent(row.conversationId)}/`;
-      await page.goto(url, { waitUntil: "domcontentloaded", timeout: 50000 });
-      await new Promise((r) => setTimeout(r, 700));
-      await ingestCurrentMessagingThread(page, sb, accountId, rules, opts.keywordsAutoReply, row.peerName).catch((e) => {
-        console.log(`[inbox_sync] ruta rápida ingest error: ${String(e).slice(0, 80)}`);
-      });
-    }
+  // Por debajo de este umbral la lista DOM se considera poco fiable → modo clic (lento). Mantener sync completo.
+  const bulkMin = inboxEnvInt("INBOX_SYNC_BULK_MIN_ROWS", 4);
+  if (orderedRows.length >= bulkMin) {
+    console.log(
+      `[inbox_sync] completado vía lista DOM ordenada (${orderedRows.length} conversaciones, umbral ${bulkMin}); sin clic por fila`
+    );
     return;
   }
-
-  // — Ruta clic: nueva UI de LinkedIn (URL cambia al hacer clic en la fila) —
-  // Volver a la lista porque pudimos haber ido a /messaging/thread/… en intentos anteriores
-  if (!page.url().startsWith("https://www.linkedin.com/messaging/")) {
-    await page.goto("https://www.linkedin.com/messaging/", { waitUntil: "domcontentloaded", timeout: 60000 });
-    await new Promise((r) => setTimeout(r, 2000));
+  if (orderedRows.length > 0) {
+    console.log(
+      `[inbox_sync] lista DOM parcial (${orderedRows.length} < ${bulkMin}); se completará con clic por fila`
+    );
+  } else {
+    console.log("[inbox_sync] sin ids en lista DOM — modo clic por fila");
   }
 
-  // Scroll para cargar filas virtualizadas
-  await scrollMessagingConversationList(page);
-  await new Promise((r) => setTimeout(r, 600));
+  await page
+    .evaluate(
+      `() => { var u = document.querySelector("ul.msg-conversations-container__conversations-list"); if (u) u.scrollTop = 0; }`
+    )
+    .catch(() => {});
+  await new Promise((r) => setTimeout(r, inboxEnvInt("INBOX_CLICK_LIST_RESET_MS", 320)));
 
-  const totalRows = await getConvRowCount(page);
-  console.log(`[inbox_sync] clic-URL mode: ${totalRows} filas detectadas`);
-  if (totalRows === 0) {
+  const rowSelector = await resolveConversationRowSelector(page);
+  if (!rowSelector) {
     console.log("[inbox_sync] sin filas; inbox vacío o selectores desactualizados");
     return;
   }
+  const totalRows = await page.locator(rowSelector).count().catch(() => 0);
+  console.log(`[inbox_sync] filas en DOM (modo clic): ${totalRows}`);
+  if (totalRows === 0) {
+    console.log("[inbox_sync] lista vacía — abortando");
+    return;
+  }
 
-  const maxI = Math.min(totalRows, opts.maxThreads);
-  const seenIds = new Set<string>();
-  const perRowMs = inboxEnvInt("INBOX_CLICK_INGEST_TIMEOUT_MS", 18_000);
+  const scrollPauseMs = inboxEnvInt("INBOX_LIST_SCROLL_PAUSE_MS", 72);
 
-  for (let i = 0; i < maxI; i++) {
-    // Volver a la lista si estamos en un hilo
-    if (page.url().includes("/messaging/thread/")) {
+  // ── Modo clic: cada fila → conversationId + nombre + foto ─────────────────
+  // LinkedIn reordena la lista: la conversación recién vista sube al tope.
+  // Índice de fila = conversaciones ya guardadas en este run; skipAdvance salta filas no clicables / sin id / duplicado.
+  const maxTarget = opts.maxThreads;
+  const seenConversationIds = new Set<string>();
+  let skipAdvance = 0;
+  let consecutiveFails = 0;
+  let realProcessedCount = 0; // conversaciones reales (sin skips/dups) — para calcular updated_at sintético
+  const syncBaseTime = Date.now(); // base para timestamps sintéticos cuando LinkedIn no expone el suyo
+
+  while (seenConversationIds.size < maxTarget && consecutiveFails < 5) {
+    // Si salimos de mensajería por error, volvemos
+    if (!page.url().includes("linkedin.com/messaging") || page.url().includes("/thread/")) {
       await page.goto("https://www.linkedin.com/messaging/", { waitUntil: "domcontentloaded", timeout: 40000 });
-      await new Promise((r) => setTimeout(r, 1400));
-      await scrollMessagingConversationList(page);
-      await new Promise((r) => setTimeout(r, 400));
+      await new Promise((r) => setTimeout(r, inboxEnvInt("INBOX_GOTO_MESSAGING_SETTLE_MS", 620)));
     }
 
-    const urlBefore = page.url();
-    console.log(`[inbox_sync] clic fila ${i + 1}/${maxI}`);
-    const clicked = await clickConvRow(page, 0, i);
-    if (!clicked) {
-      console.log(`[inbox_sync] fila ${i + 1} no clickeable, saltar`);
+    const rowIndex = seenConversationIds.size + skipAdvance;
+    const currentSel = (await resolveConversationRowSelector(page)) ?? rowSelector;
+
+    // Asegurar que la fila en posición rowIndex exista en el DOM (virtualización de LinkedIn)
+    let availableRows = await ensureConversationListHasNthRow(page, currentSel, rowIndex);
+    if (availableRows <= rowIndex) {
+      const extra = inboxEnvInt("INBOX_LIST_EXTRA_SCROLL_WHEN_STUCK", 28);
+      for (let es = 0; es < extra && availableRows <= rowIndex; es++) {
+        await scrollMessagingListOneStep(page);
+        await new Promise((r) => setTimeout(r, scrollPauseMs));
+        availableRows = await ensureConversationListHasNthRow(page, currentSel, rowIndex);
+      }
+    }
+    if (availableRows <= rowIndex) {
+      console.log(`[inbox_sync] índice ${rowIndex}: solo ${availableRows} filas disponibles — fin de lista`);
+      break;
+    }
+
+    const rowLoc = page.locator(currentSel).nth(rowIndex);
+
+    // Desplazar la fila al viewport y esperar hidratación lazy-load
+    await rowLoc.scrollIntoViewIfNeeded({ timeout: 8000 }).catch(() => {});
+    await new Promise((r) => setTimeout(r, inboxEnvInt("INBOX_CLICK_ROW_SETTLE_MS", 220)));
+
+    // Extraer timestamp real de LinkedIn de la fila.
+    // LinkedIn puede usar <time datetime="...">, data-time (epoch ms), o solo texto relativo.
+    const linkedInTimestamp = await rowLoc
+      .evaluate(
+        `(row) => {
+          // 1. <time datetime="ISO">
+          var timeEl = row.querySelector("time[datetime]");
+          if (timeEl) {
+            var dt = timeEl.getAttribute("datetime");
+            if (dt && dt.length > 5) return dt;
+          }
+          // 2. data-time (epoch ms)
+          var dataTimeEl = row.querySelector("[data-time]");
+          if (dataTimeEl) {
+            var epoch = parseInt(dataTimeEl.getAttribute("data-time") || "0", 10);
+            if (epoch > 0) return new Date(epoch).toISOString();
+          }
+          // 3. aria-label en el time element (LinkedIn a veces usa esto)
+          var timeByClass = row.querySelector(".msg-conversation-card__time-stamp, [class*='time-stamp'], [class*='timestamp']");
+          if (timeByClass) {
+            var dtClass = timeByClass.getAttribute("datetime") || timeByClass.getAttribute("data-time");
+            if (dtClass) return dtClass;
+          }
+          // 4. Cualquier atributo datetime en el subtree
+          var allTimes = row.querySelectorAll("[datetime]");
+          if (allTimes.length > 0) {
+            var dt2 = allTimes[0].getAttribute("datetime");
+            if (dt2 && dt2.length > 5) return dt2;
+          }
+          return "";
+        }`
+      )
+      .catch(() => "") as string;
+
+    const rowTimeText = await rowLoc
+      .evaluate(
+        `(row) => {
+          var tsEl = row.querySelector(
+            "time.msg-conversation-card__time-stamp, time.msg-conversation-listitem__time-stamp, " +
+            ".msg-conversation-card__time-stamp, .msg-conversation-listitem__time-stamp"
+          );
+          if (!tsEl) return "";
+          return (tsEl.textContent || "").replace(/\\s+/g, " ").trim();
+        }`
+      )
+      .catch(() => "") as string;
+
+    const listActivityFromRow = resolveListRowActivityIso(
+      { timeStampRaw: linkedInTimestamp, timeStampText: rowTimeText },
+      new Date()
+    );
+
+    // Capturar foto y preview de la fila DE LISTA (antes del clic, mientras la lista está visible).
+    // NOTA: LinkedIn usa lazy-load JS: img.src (propiedad) puede ser diferente de getAttribute("src")
+    // (atributo HTML original). Siempre usar .src para obtener la URL actual tras la hidratación.
+    const photoFromList = await rowLoc
+      .evaluate(
+        `(row) => {
+          function getUrl(el) {
+            if (!el) return "";
+            // .src es la propiedad JS (refleja cambios dinámicos), no el atributo HTML original
+            var u = el.getAttribute("data-delayed-url") || el.getAttribute("data-src") || el.src || "";
+            if (!u || u.indexOf("data:") === 0 || u.indexOf("ghost") >= 0) return "";
+            return u.indexOf("http") === 0 ? u : "";
+          }
+          // 1. Buscar img.presence-entity__image (el avatar circular del contacto en la lista)
+          var presenceImg = row.querySelector("img.presence-entity__image, img[class*='presence-entity']");
+          if (presenceImg) {
+            var pu = getUrl(presenceImg);
+            if (pu && pu.indexOf("licdn.com") >= 0) return pu;
+          }
+          // 2. Cualquier img cargada (naturalWidth > 0) con URL de CDN dentro de la fila
+          var imgs = row.querySelectorAll("img");
+          for (var i = 0; i < imgs.length; i++) {
+            var pu2 = getUrl(imgs[i]);
+            if (pu2 && pu2.indexOf("licdn.com") >= 0) return pu2;
+          }
+          // 3. Imágenes ya renderizadas (naturalWidth > 0)
+          for (var i2 = 0; i2 < imgs.length; i2++) {
+            if (imgs[i2].naturalWidth > 0) {
+              var pu3 = getUrl(imgs[i2]);
+              if (pu3 && pu3.indexOf("http") === 0) return pu3;
+            }
+          }
+          // 4. picture > source[srcset]
+          var sources = row.querySelectorAll("picture > source");
+          for (var si = 0; si < sources.length; si++) {
+            var ss = (sources[si].getAttribute("srcset") || sources[si].getAttribute("data-srcset") || "").split(",")[0];
+            var su = ss.trim().split(" ")[0];
+            if (su && su.indexOf("http") === 0) return su;
+          }
+          return "";
+        }`
+      )
+      .catch(() => "") as string;
+    const listPreview = await extractRowPreviewText(rowLoc);
+
+    // Clic en la fila
+    const clickOk = await rowLoc
+      .click({ timeout: 12_000, force: true })
+      .then(() => true)
+      .catch(() => false);
+
+    if (!clickOk) {
+      console.log(`[inbox_sync] índice ${rowIndex}: no se pudo clicar — probando siguiente`);
+      consecutiveFails++;
+      skipAdvance++;
       continue;
     }
+    consecutiveFails = 0;
 
-    // Esperar a que la URL cambie a /messaging/thread/...
-    let conversationId = "";
-    try {
-      await page.waitForURL("**/messaging/thread/**", { timeout: perRowMs });
-      const newUrl = page.url();
-      const m = newUrl.match(/\/messaging\/thread\/([^/?#]+)/i);
-      if (m?.[1]) conversationId = decodeURIComponent(m[1]);
-    } catch {
-      // URL no cambió: intentar leer ID del panel
-      conversationId = (await extractConversationIdFromMessagingUrl(page)) ?? "";
-      if (!conversationId) conversationId = (await extractThreadIdFromMessagingPane(page)) ?? "";
-    }
+    // Esperar a que la SPA navegue al hilo (pushState — suele ser instantáneo)
+    await new Promise((r) => setTimeout(r, inboxEnvInt("INBOX_CLICK_AFTER_NAV_MS", 260)));
+
+    const currentUrl = page.url();
+    const m = currentUrl.match(/\/messaging\/thread\/([^/?#]+)/i);
+    const conversationId = m?.[1] ? decodeURIComponent(m[1]) : "";
 
     if (!conversationId) {
-      console.log(`[inbox_sync] fila ${i + 1}: no se obtuvo conversationId, saltar`);
+      console.log(`[inbox_sync] índice ${rowIndex}: URL sin threadId (${currentUrl.slice(-40)})`);
+      await page.goBack({ waitUntil: "domcontentloaded", timeout: 20000 }).catch(async () => {
+        await page.goto("https://www.linkedin.com/messaging/", { waitUntil: "domcontentloaded", timeout: 30000 });
+      });
+      await new Promise((r) => setTimeout(r, inboxEnvInt("INBOX_CLICK_GOBACK_SETTLE_MS", 280)));
+      skipAdvance++;
       continue;
     }
-    if (seenIds.has(conversationId)) {
-      console.log(`[inbox_sync] fila ${i + 1}: ${conversationId.slice(0, 12)}… ya procesado`);
-      continue;
-    }
-    seenIds.add(conversationId);
 
-    console.log(`[inbox_sync] ingestando ${conversationId.slice(0, 14)}…`);
-    try {
-      await ingestCurrentMessagingThread(page, sb, accountId, rules, opts.keywordsAutoReply);
-    } catch (e) {
-      console.log(`[inbox_sync] fila ${i + 1} ingest error: ${String(e).slice(0, 100)}`);
+    if (seenConversationIds.has(conversationId)) {
+      // Debería ser raro con la estrategia de índice = conversaciones ya guardadas, pero por si acaso
+      console.log(`[inbox_sync] índice ${rowIndex}: ${conversationId.slice(0, 14)}… duplicado`);
+      await page.goBack({ waitUntil: "domcontentloaded", timeout: 20000 }).catch(async () => {
+        await page.goto("https://www.linkedin.com/messaging/", { waitUntil: "domcontentloaded", timeout: 30000 });
+      });
+      await new Promise((r) => setTimeout(r, inboxEnvInt("INBOX_CLICK_GOBACK_SETTLE_MS", 280)));
+      skipAdvance++;
+      continue;
     }
-    await new Promise((r) => setTimeout(r, 300));
+
+    // Esperar a que se cargue el panel del hilo antes de extraer nombre
+    await page
+      .locator(".msg-entity-lockup, .msg-thread__top-bar, [class*='thread-detail'], [class*='msg-s-message']")
+      .first()
+      .waitFor({ state: "visible", timeout: 6000 })
+      .catch(() => {});
+    await new Promise((r) => setTimeout(r, inboxEnvInt("INBOX_CLICK_PANEL_EXTRA_MS", 300)));
+
+    const peerName = (await extractPeerNameFromMessagingThread(page))?.trim() || null;
+
+    // Foto: 1) de la fila de lista (antes del clic), 2) del panel DERECHO del hilo (no de toda la página)
+    let peerPhotoUrl: string | null = photoFromList && photoFromList.length > 4 ? photoFromList : null;
+    if (!peerPhotoUrl) {
+      // Llamar a extractPeerPhotoUrlFromThread que ya usa IIFE y apunta al panel correcto
+      peerPhotoUrl = await extractPeerPhotoUrlFromThread(page);
+    }
+
+    // Si LinkedIn no expone timestamp, usar tiempo sintético decreciente:
+    // índice 0 (más reciente) → mayor timestamp; índice N → menor timestamp.
+    const effectiveTs = linkedInTimestamp || new Date(syncBaseTime - realProcessedCount * 120_000).toISOString();
+    seenConversationIds.add(conversationId);
+    skipAdvance = 0;
+    realProcessedCount++;
+    // list_rank 0 = primera fila clicada (más reciente en LinkedIn en ese momento); desempate en API junto a last_at
+    await upsertInboxConversationOne(sb, accountId, {
+      conversation_id: conversationId,
+      peer_name: peerName,
+      peer_photo_url: peerPhotoUrl,
+      list_preview: listPreview,
+      linkedin_updated_at: effectiveTs,
+      list_rank: realProcessedCount - 1,
+      list_last_activity_at: listActivityFromRow ?? null,
+    });
+    console.log(
+      `[inbox_sync] ✓ ${realProcessedCount}/${maxTarget}: ${peerName ?? conversationId.slice(0, 12)} foto=${!!peerPhotoUrl} ts=${listActivityFromRow ? listActivityFromRow.slice(0, 16) : linkedInTimestamp ? linkedInTimestamp.slice(0, 16) : "synth"}`
+    );
+
+    // Volver a la lista con goBack() — la SPA de LinkedIn preserva el estado
+    await page.goBack({ waitUntil: "domcontentloaded", timeout: 20000 }).catch(async () => {
+      console.log("[inbox_sync] goBack falló, navegando a /messaging/ directamente");
+      await page.goto("https://www.linkedin.com/messaging/", { waitUntil: "domcontentloaded", timeout: 30000 });
+      await new Promise((r) => setTimeout(r, inboxEnvInt("INBOX_GOTO_MESSAGING_FALLBACK_MS", 520)));
+    });
+    await new Promise((r) => setTimeout(r, inboxEnvInt("INBOX_CLICK_GOBACK_SETTLE_MS", 280)));
   }
-  console.log(`[inbox_sync] terminado: ${seenIds.size} hilos ingestionados`);
+
+  console.log(`[inbox_sync] terminado: ${seenConversationIds.size} conversaciones en inbox_conversations`);
+}
+
+/** Extrae solo el texto del snippet de preview de una fila de la lista (sin nombre ni timestamp). */
+async function extractRowPreviewText(rowLoc: import("playwright").Locator): Promise<string> {
+  // Intentar selector específico del snippet de LinkedIn
+  const snippetSels = [
+    ".msg-conversation-card__message-snippet",
+    "[class*='message-snippet']",
+    "[class*='preview']",
+    "[class*='snippet']",
+    "p[class*='subline']",
+  ];
+  for (const s of snippetSels) {
+    const el = rowLoc.locator(s).first();
+    if (await el.isVisible({ timeout: 600 }).catch(() => false)) {
+      const t = normalizeMsgText(String((await el.innerText().catch(() => "")) ?? ""));
+      if (t.length >= 2) return t.slice(0, 300);
+    }
+  }
+  // Fallback: innerText completo de la fila, acortado
+  const full = normalizeMsgText(String((await rowLoc.innerText().catch(() => "")) ?? ""));
+  return full.slice(0, 300) || "—";
 }
 
 /** Tareas en `running` si el worker murió nunca vuelven a `pending` sin esto. */
@@ -735,11 +1580,13 @@ async function recoverStaleRunningTasks(sb: SupabaseClient): Promise<void> {
   const pollStaleSec = Number(process.env.TASK_STALE_POLL_RUNNING_SEC ?? 120);
   if (Number.isFinite(pollStaleSec) && pollStaleSec >= 30) {
     const pollIso = new Date(Date.now() - pollStaleSec * 1000).toISOString();
+    // Solo poll_comments y poll_messages tienen timeout corto (120s).
+    // sync_inbox y sync_inbox_thread son de larga duración — usan el timeout de 45 min.
     const { data: pa, error: pe1 } = await sb
       .from("tasks")
       .update({ ...payload, error_message: "requeued_stale_poll" as const })
       .eq("status", "running")
-      .in("action", ["poll_comments", "poll_messages", "sync_inbox"])
+      .in("action", ["poll_comments", "poll_messages"])
       .not("locked_at", "is", null)
       .lt("locked_at", pollIso)
       .select("id");
@@ -747,7 +1594,7 @@ async function recoverStaleRunningTasks(sb: SupabaseClient): Promise<void> {
       .from("tasks")
       .update({ ...payload, error_message: "requeued_stale_poll" as const })
       .eq("status", "running")
-      .in("action", ["poll_comments", "poll_messages", "sync_inbox"])
+      .in("action", ["poll_comments", "poll_messages"])
       .is("locked_at", null)
       .lt("created_at", pollIso)
       .select("id");
@@ -995,7 +1842,13 @@ export async function runOneTask(sb: SupabaseClient, redis: RedisClient, taskId:
       }
     }
 
-    const messagingSessionActions = new Set(["poll_messages", "poll_comments", "reply_dm", "sync_inbox"]);
+    const messagingSessionActions = new Set([
+      "poll_messages",
+      "poll_comments",
+      "reply_dm",
+      "sync_inbox",
+      "sync_inbox_thread",
+    ]);
     if (messagingSessionActions.has(action)) {
       const ses = await ensureLinkedInFeedSession(page);
       if (ses.softban) {
@@ -1528,13 +2381,9 @@ export async function runOneTask(sb: SupabaseClient, redis: RedisClient, taskId:
     if (action === "poll_messages") {
       const maxThreads = inboxPollMessagesMaxThreads();
       const pollMs = inboxPollMessagesPollMs(maxThreads);
-      const syncOnly = Boolean(payload.inbox_sync_only ?? payload.sync_only);
       try {
         await runPollWithTimeout(async () => {
-          await runMessagingInboxSync(page, sb, accountId, account.user_id as string, {
-            keywordsAutoReply: !syncOnly,
-            maxThreads,
-          });
+          await runMessagingInboxSync(page, sb, accountId, account.user_id as string, { maxThreads });
           await completeTask(sb, redis, taskId);
         }, pollMs, "poll_messages");
       } catch (e) {
@@ -1549,12 +2398,31 @@ export async function runOneTask(sb: SupabaseClient, redis: RedisClient, taskId:
       const pollMs = inboxSyncPollMs(maxThreads);
       try {
         await runPollWithTimeout(async () => {
-          await runMessagingInboxSync(page, sb, accountId, account.user_id as string, {
-            keywordsAutoReply: false,
-            maxThreads,
-          });
+          await runMessagingInboxSync(page, sb, accountId, account.user_id as string, { maxThreads });
           await completeTask(sb, redis, taskId);
         }, pollMs, "sync_inbox");
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        await fail(msg.slice(0, 500));
+      }
+      return;
+    }
+
+    if (action === "sync_inbox_thread") {
+      const conversationId = String(payload.conversation_id ?? "").trim();
+      if (!conversationId) {
+        await fail("sync_inbox_thread_missing_conversation_id");
+        return;
+      }
+      const keywordsAutoReply = Boolean(payload.keywords_auto_reply);
+      const pollMs = inboxThreadSyncPollMs();
+      try {
+        await runPollWithTimeout(async () => {
+          await runMessagingThreadSync(page, sb, accountId, account.user_id as string, conversationId, {
+            keywordsAutoReply,
+          });
+          await completeTask(sb, redis, taskId);
+        }, pollMs, "sync_inbox_thread");
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
         await fail(msg.slice(0, 500));
@@ -1600,11 +2468,12 @@ export async function runOneTask(sb: SupabaseClient, redis: RedisClient, taskId:
             await a.click({ timeout: 8000 }).catch(() => {});
             await page.waitForLoadState("domcontentloaded", { timeout: 45000 }).catch(() => {});
             await new Promise((r) => setTimeout(r, 1500));
-            let reply = rule.reply_template.replace(/\{name\}/gi, "there");
+            let reply = (rule.reply_template ?? "").replace(/\{name\}/gi, "there");
             if (rule.use_ai && process.env.GEMINI_API_KEY) {
               const ctx = await page.locator("main").innerText().catch(() => "");
               reply = await generateDmReply(rule.keyword, ctx.slice(0, 4000));
             }
+            if (!reply.trim()) continue;
             const box = page
               .locator(
                 ".comments-comment-box__form-container [contenteditable='true'], div[role='textbox'][aria-label*='comment' i], .ql-editor"

@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { supabase } from "@/lib/supabase";
+import { getValidAccessToken } from "@/lib/supabase";
 import { api } from "@/lib/api";
 
 type Campaign = { id: string; name: string; status: string };
@@ -35,10 +35,8 @@ export default function CampaignsPage() {
   ]);
 
   const load = useCallback(async () => {
-    const { data } = await supabase.auth.getSession();
-    const token = data.session?.access_token;
-    if (!token) return;
-    const r = await api<{ campaigns: Campaign[] }>("/campaigns", token);
+    if (!(await getValidAccessToken())) return;
+    const r = await api<{ campaigns: Campaign[] }>("/campaigns");
     setCampaigns(r.campaigns);
   }, []);
 
@@ -47,30 +45,24 @@ export default function CampaignsPage() {
   }, [load]);
 
   async function loadSteps(id: string) {
-    const { data } = await supabase.auth.getSession();
-    const token = data.session?.access_token;
-    if (!token) return;
-    const r = await api<{ steps: Step[] }>(`/campaigns/${id}/steps`, token);
+    if (!(await getValidAccessToken())) return;
+    const r = await api<{ steps: Step[] }>(`/campaigns/${id}/steps`);
     if (r.steps?.length) setSteps(r.steps);
     setSelected(id);
   }
 
   async function create(e: React.FormEvent) {
     e.preventDefault();
-    const { data } = await supabase.auth.getSession();
-    const token = data.session?.access_token;
-    if (!token) return;
-    await api("/campaigns", token, { method: "POST", body: JSON.stringify({ name }) });
+    if (!(await getValidAccessToken())) return;
+    await api("/campaigns", { method: "POST", body: JSON.stringify({ name }) });
     setName("");
     await load();
   }
 
   async function saveSteps() {
     if (!selected) return;
-    const { data } = await supabase.auth.getSession();
-    const token = data.session?.access_token;
-    if (!token) return;
-    await api(`/campaigns/${selected}/steps`, token, {
+    if (!(await getValidAccessToken())) return;
+    await api(`/campaigns/${selected}/steps`, {
       method: "PUT",
       body: JSON.stringify({
         steps: steps.map((s) => ({
@@ -85,10 +77,8 @@ export default function CampaignsPage() {
 
   async function start() {
     if (!selected) return;
-    const { data } = await supabase.auth.getSession();
-    const token = data.session?.access_token;
-    if (!token) return;
-    await api(`/campaigns/${selected}/steps`, token, {
+    if (!(await getValidAccessToken())) return;
+    await api(`/campaigns/${selected}/steps`, {
       method: "PUT",
       body: JSON.stringify({
         steps: steps.map((s) => ({
@@ -103,7 +93,7 @@ export default function CampaignsPage() {
       tasks_scheduled: number;
       enrollments_new: number;
       enrollments_existing: number;
-    }>(`/campaigns/${selected}/start`, token, {
+    }>(`/campaigns/${selected}/start`, {
       method: "POST",
       body: JSON.stringify({}),
     });
@@ -116,10 +106,8 @@ export default function CampaignsPage() {
 
   async function pause() {
     if (!selected) return;
-    const { data } = await supabase.auth.getSession();
-    const token = data.session?.access_token;
-    if (!token) return;
-    await api(`/campaigns/${selected}/pause`, token, { method: "POST", body: JSON.stringify({}) });
+    if (!(await getValidAccessToken())) return;
+    await api(`/campaigns/${selected}/pause`, { method: "POST", body: JSON.stringify({}) });
     await load();
   }
 
