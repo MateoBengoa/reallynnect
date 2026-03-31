@@ -203,14 +203,22 @@ export function dailyCap(accountId: string, kind: LimitKind): number {
   return min + (h % (max - min + 1));
 }
 
+function resolveCap(accountId: string, kind: LimitKind, capOverride?: number | null): number {
+  if (capOverride != null && Number.isFinite(capOverride) && capOverride > 0) {
+    return Math.floor(capOverride);
+  }
+  return dailyCap(accountId, kind);
+}
+
 export async function incrementDailyCount(
   redis: RedisClient,
   accountId: string,
-  kind: LimitKind
+  kind: LimitKind,
+  capOverride?: number | null
 ): Promise<{ count: number; cap: number }> {
   const day = utcDayKey();
   const key = `limit:${kind}:${accountId}:${day}`;
-  const cap = dailyCap(accountId, kind);
+  const cap = resolveCap(accountId, kind, capOverride);
 
   if (isMemoryRedis(redis)) {
     const existing = memKv.get(key);
@@ -251,9 +259,10 @@ export async function getDailyCount(redis: RedisClient, accountId: string, kind:
 export async function checkUnderDailyCap(
   redis: RedisClient,
   accountId: string,
-  kind: LimitKind
+  kind: LimitKind,
+  capOverride?: number | null
 ): Promise<{ ok: boolean; count: number; cap: number }> {
   const count = await getDailyCount(redis, accountId, kind);
-  const cap = dailyCap(accountId, kind);
+  const cap = resolveCap(accountId, kind, capOverride);
   return { ok: count < cap, count, cap };
 }

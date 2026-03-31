@@ -3,9 +3,12 @@
   "version": "1.0.0",
   "private": true,
   "scripts": {
-    "dev": "next dev -p 3000",
+    "clean": "node -e \"require('fs').rmSync('.next',{recursive:true,force:true})\"",
+    "dev": "next dev -p 3030",
+    "dev:fresh": "npm run clean && next dev -p 3030",
+    "dev:3035": "next dev -p 3035",
     "build": "next build",
-    "start": "next start -p 3000"
+    "start": "next start -p 3030"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.47.10",

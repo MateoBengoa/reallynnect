@@ -16,6 +16,10 @@ export async function openFeed(page: Page): Promise<ActionResult> {
   await randomDelay(fast ? 800 : 15000, fast ? 2500 : 45000);
   await page.goto("https://www.linkedin.com/feed/", { waitUntil: "domcontentloaded", timeout: 90000 });
   await lightMouseJitter(page);
+  const u = page.url().toLowerCase();
+  if (u.includes("/login") || u.includes("/checkpoint") || u.includes("/challenge")) {
+    return { ok: false, error: "linkedin_login_or_challenge" };
+  }
   await humanScroll(page, 30000);
   const g = await guardSoftban(page);
   if (g) return g;

@@ -3,7 +3,7 @@
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 import { supabase } from "@/lib/supabase";
-import { FloatingDock } from "@/components/FloatingDock";
+import { FloatingDashboardNav } from "@/components/FloatingDashboardNav";
 
 export default function DashboardLayout({ children }: { children: React.ReactNode }) {
   const router = useRouter();
@@ -29,8 +29,10 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
 
   return (
     <div className="relative min-h-screen">
-      <div className="min-h-screen overflow-auto pb-[calc(5.5rem+env(safe-area-inset-bottom))] p-4 sm:p-6">{children}</div>
-      <FloatingDock onLogout={logout} />
+      <div className="min-h-screen overflow-auto px-4 pb-6 pt-[calc(4.25rem+env(safe-area-inset-top))] sm:px-6 sm:pb-8 sm:pt-[calc(4.5rem+env(safe-area-inset-top))] lg:px-8">
+        <div className="page-shell">{children}</div>
+      </div>
+      <FloatingDashboardNav onLogout={logout} />
     </div>
   );
 }

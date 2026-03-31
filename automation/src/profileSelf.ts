@@ -69,11 +69,19 @@ function parseVoyagerMe(body: unknown): LoggedInProfileScrape & { publicIdentifi
   return out;
 }
 
-async function fetchVoyagerMeInPage(page: Page): Promise<unknown | null> {
-  return page.evaluate(async () => {
+const VOYAGER_ME_TIMEOUT_MS = 14_000;
+
+async function fetchVoyagerMeInPage(
+  page: Page,
+  timeoutMs: number = VOYAGER_ME_TIMEOUT_MS
+): Promise<unknown | null> {
+  return page.evaluate(async (ms: number) => {
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(), ms);
     try {
       const r = await fetch("https://www.linkedin.com/voyager/api/me", {
         credentials: "include",
+        signal: ac.signal,
         headers: {
           accept: "application/vnd.linkedin.normalized+json+2.1",
           "x-restli-protocol-version": "2.0.0",
@@ -83,11 +91,37 @@ async function fetchVoyagerMeInPage(page: Page): Promise<unknown | null> {
       return await r.json();
     } catch {
       return null;
+    } finally {
+      clearTimeout(timer);
     }
+  }, timeoutMs);
+}
+
+/** Slug /in/{id}/ desde la URL o enlaces del DOM (feed o actividad). */
+async function extractPublicIdentifierFromPage(page: Page): Promise<string | null> {
+  const fromUrl = page.url().match(/linkedin\.com\/in\/([^/?#]+)\//i);
+  if (fromUrl) {
+    const id = decodeURIComponent(fromUrl[1]!);
+    if (id.toLowerCase() !== "me" && !id.includes("company") && !id.includes("school")) {
+      return id;
+    }
+  }
+  return page.evaluate(() => {
+    const nodes = document.querySelectorAll('header a[href*="/in/"], main a[href*="/in/"]');
+    for (const a of nodes) {
+      const h = a.getAttribute("href") || "";
+      const m = h.match(/\/in\/([^/?#]+)/i);
+      if (!m) continue;
+      const id = decodeURIComponent(m[1]!);
+      if (id.toLowerCase() === "me") continue;
+      if (id.includes("company") || id.includes("school")) continue;
+      return id;
+    }
+    return null;
   });
 }
 
-async function scrapeProfileDom(page: Page): Promise<LoggedInProfileScrape> {
+export async function scrapeProfileDom(page: Page): Promise<LoggedInProfileScrape> {
   const nameSelectors = [
     "h1.text-heading-xlarge",
     "h1.inline",
@@ -189,9 +223,12 @@ export async function scrapeLoggedInMemberProfile(page: Page): Promise<LoggedInP
   await page.goto("https://www.linkedin.com/feed/", { waitUntil: "domcontentloaded", timeout: 90000 });
   await randomDelay(400, 1200);
 
-  const rawJson = await fetchVoyagerMeInPage(page);
+  const rawJson = await fetchVoyagerMeInPage(page, VOYAGER_ME_TIMEOUT_MS);
   const fromApi = parseVoyagerMe(rawJson);
-  const publicIdentifier = fromApi.publicIdentifier;
+  let publicIdentifier = fromApi.publicIdentifier;
+  if (!publicIdentifier) {
+    publicIdentifier = await extractPublicIdentifierFromPage(page);
+  }
   let merged: LoggedInProfileScrape = {
     displayName: fromApi.displayName,
     headline: fromApi.headline,
@@ -252,4 +289,226 @@ export async function scrapeLoggedInMemberProfile(page: Page): Promise<LoggedInP
   }
 
   return merged;
+}
+
+export type ScrapedActivityPost = {
+  content: string;
+  linkedin_activity_url: string | null;
+  linkedin_activity_urn: string | null;
+};
+
+function urnFromLinkedInUrl(url: string): string | null {
+  const m = url.match(/urn:li:[^/?#]+/i);
+  return m ? m[0]! : null;
+}
+
+export type ScrapeActivityPostsResult = {
+  posts: ScrapedActivityPost[];
+  publicIdentifier: string | null;
+};
+
+/**
+ * Abre la actividad reciente del miembro logueado e intenta extraer publicaciones (texto + enlace).
+ * Depende del DOM de LinkedIn; puede devolver pocos o ningún ítem si cambia la UI.
+ */
+export async function scrapeLoggedInMemberActivityPosts(
+  page: Page,
+  maxPosts = 50
+): Promise<ScrapeActivityPostsResult> {
+  await page.goto("https://www.linkedin.com/feed/", { waitUntil: "domcontentloaded", timeout: 90000 });
+  await randomDelay(400, 1200);
+  const rawJson = await fetchVoyagerMeInPage(page, VOYAGER_ME_TIMEOUT_MS);
+  const fromApi = parseVoyagerMe(rawJson);
+  let pid: string | null = fromApi.publicIdentifier;
+  if (!pid) {
+    pid = await extractPublicIdentifierFromPage(page);
+  }
+  if (!pid) {
+    return { posts: [], publicIdentifier: null };
+  }
+
+  const activityUrl = `https://www.linkedin.com/in/${encodeURIComponent(pid)}/recent-activity/all/`;
+  await page.goto(activityUrl, { waitUntil: "domcontentloaded", timeout: 90000 });
+  await page.waitForLoadState("networkidle", { timeout: 25_000 }).catch(() => {});
+  await randomDelay(1200, 2200);
+
+  pid = (await extractPublicIdentifierFromPage(page)) ?? pid;
+
+  for (let i = 0; i < 14; i++) {
+    await page.mouse.wheel(0, 1400);
+    await randomDelay(350, 700);
+  }
+
+  const raw = await page.evaluate(
+    ({ max, publicId }: { max: number; publicId: string }) => {
+      const out: { content: string; url: string }[] = [];
+      const seen = new Set<string>();
+      const seenCk = new Set<string>();
+
+      const abs = (href: string) => {
+        if (href.startsWith("/")) return `https://www.linkedin.com${href}`;
+        return href;
+      };
+
+      const isGenericActivityAll = (href: string) => {
+        try {
+          const u = new URL(href, "https://www.linkedin.com");
+          return /\/recent-activity\/all\/?$/i.test(u.pathname);
+        } catch {
+          return false;
+        }
+      };
+
+      /** LinkedIn mete parte del feed en shadow roots; querySelector plano no los ve. */
+      const queryDeepAll = (sel: string): Element[] => {
+        const acc: Element[] = [];
+        const visit = (root: Document | ShadowRoot) => {
+          try {
+            root.querySelectorAll(sel).forEach((el) => acc.push(el));
+          } catch {
+            /* selector inválido en algún root */
+          }
+          root.querySelectorAll("*").forEach((host) => {
+            const sr = (host as HTMLElement).shadowRoot;
+            if (sr) visit(sr);
+          });
+        };
+        visit(document);
+        return acc;
+      };
+
+      const hrefLooksLikePost = (href: string) => {
+        const h = href.toLowerCase();
+        return (
+          h.includes("/feed/update/") ||
+          h.includes("urn:li:activity") ||
+          h.includes("ugcpost") ||
+          h.includes("/posts/") ||
+          h.includes("activityurn") ||
+          h.includes("detail/activity-") ||
+          h.includes("activity-")
+        );
+      };
+
+      const phaseA = () => {
+        const main = document.querySelector("main");
+        const anchors = main
+          ? main.querySelectorAll("a[href]")
+          : document.querySelectorAll("a[href]");
+        for (const a of anchors) {
+          if (out.length >= max) break;
+          const el = a as HTMLAnchorElement;
+          let href = el.getAttribute("href") || "";
+          if (!hrefLooksLikePost(href)) continue;
+          href = abs(href);
+          if (!href.startsWith("http")) continue;
+          const key = href.split("?")[0] ?? href;
+          if (seen.has(key)) continue;
+          const root =
+            el.closest("article") ??
+            el.closest('[role="article"]') ??
+            el.closest("[class*='feed-shared-update-v2']") ??
+            el.closest("[class*='update-components']") ??
+            el.closest("div");
+          let text = (root?.innerText || "").replace(/\s+/g, " ").trim();
+          if (text.length < 12) continue;
+          text = text.slice(0, 12000);
+          seen.add(key);
+          out.push({ content: text, url: key });
+        }
+      };
+
+      const MIN_POST_CHARS = 12;
+      const CLIMB_MIN_CHARS = 48;
+
+      const phaseB = () => {
+        const anchors = queryDeepAll("a[componentkey]");
+        for (const a of anchors) {
+          if (out.length >= max) break;
+          const el = a as HTMLAnchorElement;
+          const ck = el.getAttribute("componentkey");
+          if (!ck || seenCk.has(ck)) continue;
+
+          let href = el.getAttribute("href") || "";
+          href = abs(href);
+          if (!href.startsWith("http")) continue;
+
+          const label = (el.innerText || "").replace(/\s+/g, " ").trim();
+          const generic = isGenericActivityAll(href);
+
+          if (generic) {
+            let text: string;
+            if (label.length >= 28) {
+              const root =
+                el.closest("article") ??
+                el.closest('[role="article"]') ??
+                el.closest("[class*='feed-shared-update-v2']") ??
+                el.closest("[class*='update-components']") ??
+                el.closest("div");
+              text = (root?.innerText || el.innerText || "").replace(/\s+/g, " ").trim();
+            } else {
+              let root: Element | null = null;
+              let p: Element | null = el;
+              for (let i = 0; i < 18 && p; i++) {
+                const he = p as HTMLElement;
+                const t = (he.innerText || "").replace(/\s+/g, " ").trim();
+                if (t.length >= CLIMB_MIN_CHARS) {
+                  root = p;
+                  break;
+                }
+                p = p.parentElement;
+              }
+              if (!root) continue;
+              text = ((root as HTMLElement).innerText || "").replace(/\s+/g, " ").trim();
+            }
+            if (text.length < MIN_POST_CHARS) continue;
+            text = text.slice(0, 12000);
+            const synthetic = `https://www.linkedin.com/in/${encodeURIComponent(
+              publicId
+            )}/recent-activity/all/#ck=${ck}`;
+            if (seen.has(synthetic)) continue;
+            seen.add(synthetic);
+            seenCk.add(ck);
+            out.push({ content: text, url: synthetic });
+            continue;
+          }
+
+          const key = href.split("?")[0] ?? href;
+          if (seen.has(key)) continue;
+          try {
+            const u = new URL(href, "https://www.linkedin.com");
+            if (/^\/in\/[^/]+\/?$/i.test(u.pathname)) continue;
+          } catch {
+            /* seguir */
+          }
+          const root =
+            el.closest("article") ??
+            el.closest('[role="article"]') ??
+            el.closest("[class*='feed-shared-update-v2']") ??
+            el.closest("[class*='update-components']") ??
+            el.closest("div");
+          let text = (root?.innerText || "").replace(/\s+/g, " ").trim();
+          if (text.length < MIN_POST_CHARS) continue;
+          text = text.slice(0, 12000);
+          seen.add(key);
+          seenCk.add(ck);
+          out.push({ content: text, url: key });
+        }
+      };
+
+      phaseA();
+      phaseB();
+
+      return out;
+    },
+    { max: maxPosts, publicId: pid }
+  );
+
+  const posts = raw.map((r) => ({
+    content: r.content,
+    linkedin_activity_url: r.url,
+    linkedin_activity_urn: r.url ? urnFromLinkedInUrl(r.url) : null,
+  }));
+
+  return { posts, publicIdentifier: pid };
 }

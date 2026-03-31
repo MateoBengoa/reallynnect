@@ -39,10 +39,10 @@ const primaryNav = [
 
 const moreLinks = [
   { href: "/dashboard/leads", label: "Leads" },
+  { href: "/dashboard/content", label: "Contenido" },
+  { href: "/dashboard/settings", label: "Ajustes" },
   { href: "/dashboard/accounts", label: "Cuentas LinkedIn" },
   { href: "/dashboard/proxies", label: "Proxies" },
-  { href: "/dashboard/posts", label: "Posts" },
-  { href: "/dashboard/rules", label: "Keywords" },
   { href: "/dashboard/tasks", label: "Tareas" },
   { href: "/dashboard/roadmap", label: "Roadmap" },
 ] as const;

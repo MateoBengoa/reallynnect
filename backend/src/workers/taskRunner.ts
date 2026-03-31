@@ -2,10 +2,10 @@ import {
   closeSession,
   createContext,
   injectLiAt,
-  openFeed,
   ensureLinkedInFeedSession,
   publishPost,
   scrapeLoggedInMemberProfile,
+  scrapeLoggedInMemberActivityPosts,
   followProfile,
   likeLeadRecentPost,
   commentLeadRecentPost,
@@ -20,7 +20,9 @@ import {
   sendMessageInMessagingThread,
   normalizeMessagingThreadInput,
   ensureProfilePageLoaded,
+  scrapeProfileDom,
 } from "@linkedin-saas/automation";
+import type { ScrapeActivityPostsResult } from "@linkedin-saas/automation";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Page } from "playwright";
 import fs from "fs/promises";
@@ -35,8 +37,9 @@ import {
   releaseBrowserSlot,
   removeTaskFromDue,
 } from "../queues/redisClient.js";
-import type { RedisClient } from "../queues/redisClient.js";
+import type { LimitKind, RedisClient } from "../queues/redisClient.js";
 import { decryptSecret } from "../lib/crypto.js";
+import { dispatchTaskWebhook } from "../lib/taskWebhook.js";
 import { advanceEnrollmentAfterStep } from "../services/campaignEngine.js";
 import { generateConnectionMessage, generateDmReply, generateImageBytes } from "../services/gemini.js";
 import { loadProxy, markProxyDegraded, markProxyUsed, pickProxyForAccount } from "../services/proxyAssign.js";
@@ -44,6 +47,27 @@ import { enrichWorkerFailureMessage, startPlaywrightTraceIfConfigured, type Trac
 import { parseLinkedInInboxListTime } from "../lib/linkedinInboxListTime.js";
 
 const MAX_ATTEMPTS = 5;
+
+async function persistLeadProfilePhotoFromOpenPage(
+  sb: SupabaseClient,
+  page: Page,
+  opts: { leadId: string | null | undefined; accountUserId: string; profileUrl: string }
+): Promise<void> {
+  const { leadId, accountUserId, profileUrl } = opts;
+  if (!leadId?.trim()) return;
+  try {
+    const low = profileUrl.toLowerCase();
+    if (!low.includes("linkedin.com") || !low.includes("/in/")) return;
+    const dom = await scrapeProfileDom(page);
+    const photo = dom.photoUrl?.trim();
+    if (!photo || (!photo.startsWith("http://") && !photo.startsWith("https://"))) return;
+    const { data: row } = await sb.from("leads").select("user_id").eq("id", leadId).maybeSingle();
+    if (!row || (row.user_id as string) !== accountUserId) return;
+    await sb.from("leads").update({ photo_url: photo }).eq("id", leadId).eq("user_id", accountUserId);
+  } catch (e) {
+    console.warn("[worker] persistLeadProfilePhotoFromOpenPage", e instanceof Error ? e.message : e);
+  }
+}
 
 /** `message_template` como `data:audio/...;base64,...` para el paso `voice_note`. */
 async function writeVoiceDataUrlToTempFile(taskId: string, dataUrl: string): Promise<string | null> {
@@ -80,6 +104,8 @@ function taskDispatchGroup(action: string, enrollmentId: unknown): number {
   if (action === "verify_session" || action === "session_check" || action === "sync_profile") return 1;
   if (
     action === "visit_profile" ||
+    action === "sync_lead_photo" ||
+    action === "batch_sync_lead_photos" ||
     action === "follow" ||
     action === "like_post" ||
     action === "comment_post" ||
@@ -93,7 +119,14 @@ function taskDispatchGroup(action: string, enrollmentId: unknown): number {
     return 2;
   if (action === "publish_post") return 2;
   if (action === "warmup_feed") return 4;
-    if (action === "poll_messages" || action === "poll_comments" || action === "sync_inbox" || action === "sync_inbox_thread")
+  if (action === "import_leads") return 2;
+    if (
+      action === "poll_messages" ||
+      action === "poll_comments" ||
+      action === "sync_inbox" ||
+      action === "sync_inbox_thread" ||
+      action === "sync_linkedin_posts"
+    )
       return 10;
     if (action === "reply_dm") return 2;
   return 3;
@@ -1021,7 +1054,12 @@ async function runMessagingThreadSync(
   console.log(`[inbox_thread_sync] thread=${conversationId.slice(0, 12)}… burbujas=${rows.length}`);
 
   if (!opts.keywordsAutoReply || !rows.length) return;
-  const { data: rulesRaw } = await sb.from("keyword_rules").select("*").eq("user_id", userId).eq("rule_type", "dm");
+  const { data: rulesRaw } = await sb
+    .from("keyword_rules")
+    .select("*")
+    .eq("user_id", userId)
+    .eq("rule_type", "dm")
+    .eq("is_active", true);
   const rules = (rulesRaw ?? []) as DmRuleRow[];
   if (!rules.length) return;
   const lastIn = [...bubbles].reverse().find((b) => b?.direction === "in");
@@ -1098,6 +1136,37 @@ async function insertChatRowIfFresh(
     peer_photo_url: extra?.peer_photo_url ?? null,
   });
   return true;
+}
+
+function accountDailyCap(account: Record<string, unknown>, kind: LimitKind): number | undefined {
+  const col =
+    kind === "message"
+      ? "daily_message_budget"
+      : kind === "visit"
+        ? "daily_visit_budget"
+        : "daily_connect_budget";
+  const v = account[col];
+  if (v == null) return undefined;
+  const n = typeof v === "number" ? v : Number(v);
+  if (!Number.isFinite(n) || n < 1) return undefined;
+  return Math.floor(n);
+}
+
+async function logInboundCommentEvent(
+  sb: SupabaseClient,
+  userId: string,
+  accountId: string,
+  ruleId: string,
+  eventType: "comment_reply" | "dm_followup" | "skip" | "error",
+  detail: Record<string, unknown> | null
+): Promise<void> {
+  await sb.from("inbound_comment_events").insert({
+    user_id: userId,
+    account_id: accountId,
+    rule_id: ruleId,
+    event_type: eventType,
+    detail: detail ?? null,
+  });
 }
 
 async function scrollMessagingConversationList(page: Page): Promise<void> {
@@ -1582,11 +1651,12 @@ async function recoverStaleRunningTasks(sb: SupabaseClient): Promise<void> {
     const pollIso = new Date(Date.now() - pollStaleSec * 1000).toISOString();
     // Solo poll_comments y poll_messages tienen timeout corto (120s).
     // sync_inbox y sync_inbox_thread son de larga duración — usan el timeout de 45 min.
+    const shortStaleActions = ["poll_comments", "poll_messages", "verify_session", "session_check"];
     const { data: pa, error: pe1 } = await sb
       .from("tasks")
       .update({ ...payload, error_message: "requeued_stale_poll" as const })
       .eq("status", "running")
-      .in("action", ["poll_comments", "poll_messages"])
+      .in("action", shortStaleActions)
       .not("locked_at", "is", null)
       .lt("locked_at", pollIso)
       .select("id");
@@ -1594,7 +1664,7 @@ async function recoverStaleRunningTasks(sb: SupabaseClient): Promise<void> {
       .from("tasks")
       .update({ ...payload, error_message: "requeued_stale_poll" as const })
       .eq("status", "running")
-      .in("action", ["poll_comments", "poll_messages"])
+      .in("action", shortStaleActions)
       .is("locked_at", null)
       .lt("created_at", pollIso)
       .select("id");
@@ -1684,6 +1754,12 @@ async function failTask(
   if (attempts >= MAX_ATTEMPTS) {
     await sb.from("tasks").update({ status: "dead", error_message: finalMsg }).eq("id", taskId);
     await removeTaskFromDue(redis, taskId);
+    void dispatchTaskWebhook(sb, taskId, "task.failed");
+    const action = task.action as string;
+    const accId = task.account_id as string | undefined;
+    if (accId && (action === "verify_session" || action === "session_check")) {
+      await sb.from("linkedin_accounts").update({ connection_status: "error" }).eq("id", accId);
+    }
     return;
   }
 
@@ -1700,6 +1776,7 @@ async function failTask(
 async function completeTask(sb: SupabaseClient, redis: RedisClient, taskId: string) {
   await sb.from("tasks").update({ status: "completed", error_message: null }).eq("id", taskId);
   await removeTaskFromDue(redis, taskId);
+  void dispatchTaskWebhook(sb, taskId, "task.completed");
 }
 
 async function pauseAccountSoftban(sb: SupabaseClient, accountId: string) {
@@ -1719,9 +1796,20 @@ export async function runOneTask(sb: SupabaseClient, redis: RedisClient, taskId:
   if (!task) return;
   await removeTaskFromDue(redis, taskId).catch(() => {});
 
-  const accountId = task.account_id as string;
   const action = task.action as string;
   console.log("[worker] Ejecutando tarea", taskId.slice(0, 8) + "…", "action=", action);
+
+  // Acciones que no requieren navegador ni cuenta activa — resuelven inmediatamente.
+  if (action === "wait" || action === "sync_lead_photo" || action === "batch_sync_lead_photos") {
+    await completeTask(sb, redis, taskId);
+    const enrollmentId = task.enrollment_id as string | undefined;
+    if (enrollmentId) {
+      await advanceEnrollmentAfterStep(sb, redis, enrollmentId, 0);
+    }
+    return;
+  }
+
+  const accountId = task.account_id as string;
   const payload = (task.payload ?? {}) as Record<string, unknown>;
 
   const { data: account, error: acErr } = await sb
@@ -1883,7 +1971,8 @@ export async function runOneTask(sb: SupabaseClient, redis: RedisClient, taskId:
     };
 
     if (action === "verify_session" || action === "session_check") {
-      const r = await openFeed(page);
+      /** `openFeed` hace scroll ~30s y no comprueba /login; en verificación usamos sesión rápida y URL. */
+      const r = await ensureLinkedInFeedSession(page);
       const verifiedAt = new Date().toISOString();
       if (r.softban) {
         await pauseAccountSoftban(sb, accountId);
@@ -1910,8 +1999,14 @@ export async function runOneTask(sb: SupabaseClient, redis: RedisClient, taskId:
         headline: null,
         photoUrl: null,
       };
+      const profileScrapeMs = 50_000;
       try {
-        profile = await scrapeLoggedInMemberProfile(page);
+        profile = await Promise.race([
+          scrapeLoggedInMemberProfile(page),
+          new Promise<typeof profile>((_, reject) =>
+            setTimeout(() => reject(new Error("scrapeLoggedInMemberProfile_timeout")), profileScrapeMs)
+          ),
+        ]);
       } catch (e) {
         console.error("scrapeLoggedInMemberProfile", e);
       }
@@ -1955,6 +2050,65 @@ export async function runOneTask(sb: SupabaseClient, redis: RedisClient, taskId:
       return;
     }
 
+    if (action === "sync_linkedin_posts") {
+      const ses = await ensureLinkedInFeedSession(page);
+      if (ses.softban) {
+        await pauseAccountSoftban(sb, accountId);
+        await fail("softban");
+        return;
+      }
+      if (!ses.ok) {
+        await fail(ses.error ?? "linkedin_session_failed");
+        return;
+      }
+      let scraped: ScrapeActivityPostsResult["posts"] = [];
+      let activityPid: string | null = null;
+      try {
+        const r = await scrapeLoggedInMemberActivityPosts(page, 80);
+        scraped = r.posts;
+        activityPid = r.publicIdentifier;
+      } catch (e) {
+        console.error("[sync_linkedin_posts] scrape", e);
+      }
+      for (const row of scraped) {
+        const url = row.linkedin_activity_url;
+        if (!url || !row.content.trim()) continue;
+        const content = row.content.slice(0, 19000);
+        const { data: existing } = await sb
+          .from("posts")
+          .select("id")
+          .eq("account_id", accountId)
+          .eq("linkedin_activity_url", url)
+          .maybeSingle();
+        if (existing?.id) {
+          await sb
+            .from("posts")
+            .update({
+              content,
+              linkedin_activity_urn: row.linkedin_activity_urn ?? null,
+              status: "published",
+            })
+            .eq("id", existing.id);
+        } else {
+          const { error: insErr } = await sb.from("posts").insert({
+            account_id: accountId,
+            content,
+            status: "published",
+            linkedin_activity_url: url,
+            linkedin_activity_urn: row.linkedin_activity_urn ?? null,
+            image_url: null,
+          });
+          if (insErr) console.error("[sync_linkedin_posts] insert", insErr.message);
+        }
+      }
+      const pidLog = activityPid ?? "?";
+      console.log(
+        `[sync_linkedin_posts] account=${accountId.slice(0, 8)}… pid=${pidLog} items=${scraped.length}`
+      );
+      await afterSuccess(0);
+      return;
+    }
+
     if (action === "warmup_feed") {
       const url = payload.random_profile_url as string | undefined;
       const r = await sessionWarmup(page, url);
@@ -1963,13 +2117,17 @@ export async function runOneTask(sb: SupabaseClient, redis: RedisClient, taskId:
         await fail("softban");
         return;
       }
+      if (!r.ok) {
+        await fail(r.error ?? "warmup_feed_failed");
+        return;
+      }
       await sb.from("linkedin_accounts").update({ last_warmup_at: new Date().toISOString() }).eq("id", accountId);
       await afterSuccess(await getNextStepDelay());
       return;
     }
 
     if (action === "visit_profile") {
-      const cap = await checkUnderDailyCap(redis, accountId, "visit");
+      const cap = await checkUnderDailyCap(redis, accountId, "visit", accountDailyCap(account, "visit"));
       if (!cap.ok) {
         const tomorrow = new Date();
         tomorrow.setUTCDate(tomorrow.getUTCDate() + 1);
@@ -1998,8 +2156,27 @@ export async function runOneTask(sb: SupabaseClient, redis: RedisClient, taskId:
         return;
       }
       await ensureProfilePageLoaded(page, profileUrl);
-      await incrementDailyCount(redis, accountId, "visit");
+      await persistLeadProfilePhotoFromOpenPage(sb, page, {
+        leadId: task.lead_id as string | null | undefined,
+        accountUserId: account.user_id as string,
+        profileUrl,
+      });
+      await incrementDailyCount(redis, accountId, "visit", accountDailyCap(account, "visit"));
       await afterSuccess(await getNextStepDelay());
+      return;
+    }
+
+    if (action === "sync_lead_photo") {
+      // Tarea obsoleta: la foto principal ya no se consulta visitando el perfil uno por uno 
+      // para no interrumpir el flujo del worker con ventanas aleatorias de perfiles.
+      await afterSuccess(0);
+      return;
+    }
+
+    if (action === "batch_sync_lead_photos") {
+      // Tarea obsoleta: la foto principal ya se obtiene vía harvestapi/linkedin-profile-search.
+      // Se omite visitar el perfil para no agotar el cupo ni generar loops infinitos pendientes.
+      await afterSuccess(0);
       return;
     }
 
@@ -2067,7 +2244,7 @@ export async function runOneTask(sb: SupabaseClient, redis: RedisClient, taskId:
     }
 
     if (action === "connect") {
-      const cap = await checkUnderDailyCap(redis, accountId, "connect");
+      const cap = await checkUnderDailyCap(redis, accountId, "connect", accountDailyCap(account, "connect"));
       if (!cap.ok) {
         const tomorrow = new Date();
         tomorrow.setUTCDate(tomorrow.getUTCDate() + 1);
@@ -2109,13 +2286,13 @@ export async function runOneTask(sb: SupabaseClient, redis: RedisClient, taskId:
         await fail(r.error ?? "connect_failed");
         return;
       }
-      await incrementDailyCount(redis, accountId, "connect");
+      await incrementDailyCount(redis, accountId, "connect", accountDailyCap(account, "connect"));
       await afterSuccess(await getNextStepDelay());
       return;
     }
 
     if (action === "send_message") {
-      const cap = await checkUnderDailyCap(redis, accountId, "message");
+      const cap = await checkUnderDailyCap(redis, accountId, "message", accountDailyCap(account, "message"));
       if (!cap.ok) {
         const tomorrow = new Date();
         tomorrow.setUTCDate(tomorrow.getUTCDate() + 1);
@@ -2154,13 +2331,13 @@ export async function runOneTask(sb: SupabaseClient, redis: RedisClient, taskId:
         await fail(r.error ?? "message_failed");
         return;
       }
-      await incrementDailyCount(redis, accountId, "message");
+      await incrementDailyCount(redis, accountId, "message", accountDailyCap(account, "message"));
       await afterSuccess(await getNextStepDelay());
       return;
     }
 
     if (action === "send_message_open_profile") {
-      const cap = await checkUnderDailyCap(redis, accountId, "message");
+      const cap = await checkUnderDailyCap(redis, accountId, "message", accountDailyCap(account, "message"));
       if (!cap.ok) {
         const tomorrow = new Date();
         tomorrow.setUTCDate(tomorrow.getUTCDate() + 1);
@@ -2199,13 +2376,13 @@ export async function runOneTask(sb: SupabaseClient, redis: RedisClient, taskId:
         await fail(r.error ?? "message_failed");
         return;
       }
-      await incrementDailyCount(redis, accountId, "message");
+      await incrementDailyCount(redis, accountId, "message", accountDailyCap(account, "message"));
       await afterSuccess(await getNextStepDelay());
       return;
     }
 
     if (action === "voice_note") {
-      const cap = await checkUnderDailyCap(redis, accountId, "message");
+      const cap = await checkUnderDailyCap(redis, accountId, "message", accountDailyCap(account, "message"));
       if (!cap.ok) {
         const tomorrow = new Date();
         tomorrow.setUTCDate(tomorrow.getUTCDate() + 1);
@@ -2254,7 +2431,7 @@ export async function runOneTask(sb: SupabaseClient, redis: RedisClient, taskId:
           await fail(r.error ?? "voice_note_failed");
           return;
         }
-        await incrementDailyCount(redis, accountId, "message");
+        await incrementDailyCount(redis, accountId, "message", accountDailyCap(account, "message"));
         await afterSuccess(await getNextStepDelay());
       } finally {
         await fs.unlink(tmpPath).catch(() => {});
@@ -2293,7 +2470,7 @@ export async function runOneTask(sb: SupabaseClient, redis: RedisClient, taskId:
     }
 
     if (action === "inmail") {
-      const cap = await checkUnderDailyCap(redis, accountId, "message");
+      const cap = await checkUnderDailyCap(redis, accountId, "message", accountDailyCap(account, "message"));
       if (!cap.ok) {
         const tomorrow = new Date();
         tomorrow.setUTCDate(tomorrow.getUTCDate() + 1);
@@ -2345,7 +2522,7 @@ export async function runOneTask(sb: SupabaseClient, redis: RedisClient, taskId:
         await fail(r.error ?? "inmail_failed");
         return;
       }
-      await incrementDailyCount(redis, accountId, "message");
+      await incrementDailyCount(redis, accountId, "message", accountDailyCap(account, "message"));
       await afterSuccess(await getNextStepDelay());
       return;
     }
@@ -2373,7 +2550,27 @@ export async function runOneTask(sb: SupabaseClient, redis: RedisClient, taskId:
         await fail("softban");
         return;
       }
-      await sb.from("posts").update({ status: r.ok ? "published" : "failed" }).eq("id", postId);
+      let linkedin_activity_url: string | null = null;
+      let linkedin_activity_urn: string | null = null;
+      if (r.ok) {
+        try {
+          const u = page.url();
+          linkedin_activity_url = u.split("?")[0].slice(0, 2000);
+          const m = u.match(/(urn:li:[^/?#\s]+)/);
+          linkedin_activity_urn = m?.[1] ?? null;
+        } catch {
+          /* ignore */
+        }
+      }
+      await sb
+        .from("posts")
+        .update({
+          status: r.ok ? "published" : "failed",
+          ...(r.ok
+            ? { linkedin_activity_url: linkedin_activity_url ?? null, linkedin_activity_urn }
+            : {}),
+        })
+        .eq("id", postId);
       await afterSuccess(0);
       return;
     }
@@ -2432,6 +2629,7 @@ export async function runOneTask(sb: SupabaseClient, redis: RedisClient, taskId:
 
     if (action === "poll_comments") {
       const pollMs = Number(process.env.POLL_TASK_TIMEOUT_MS ?? 90_000);
+      const userId = account.user_id as string;
       try {
         await runPollWithTimeout(async () => {
           await page.goto("https://www.linkedin.com/notifications/", { waitUntil: "domcontentloaded", timeout: 60000 });
@@ -2439,20 +2637,66 @@ export async function runOneTask(sb: SupabaseClient, redis: RedisClient, taskId:
           const { data: rules } = await sb
             .from("keyword_rules")
             .select("*")
-            .eq("user_id", account.user_id)
-            .eq("rule_type", "comment");
-          const list = rules ?? [];
+            .eq("user_id", userId)
+            .eq("rule_type", "comment")
+            .eq("is_active", true);
+          let list = rules ?? [];
+          list = list.filter((r) => !r.account_id || r.account_id === accountId);
           if (!list.length) {
             await completeTask(sb, redis, taskId);
             return;
           }
+          const postIds = [...new Set(list.map((r) => r.post_id).filter(Boolean))] as string[];
+          const postMap = new Map<
+            string,
+            { id: string; account_id: string; linkedin_activity_urn: string | null; linkedin_activity_url: string | null }
+          >();
+          if (postIds.length) {
+            const { data: postsRows } = await sb
+              .from("posts")
+              .select("id, account_id, linkedin_activity_urn, linkedin_activity_url")
+              .in("id", postIds);
+            for (const p of postsRows ?? []) {
+              if (p.account_id === accountId) postMap.set(p.id, p);
+            }
+          }
+
+          function postMatches(
+            rule: (typeof list)[0],
+            notificationText: string,
+            linkHref: string
+          ): boolean {
+            if (!rule.post_id) return true;
+            const p = postMap.get(rule.post_id);
+            if (!p) return false;
+            if (p.linkedin_activity_urn) {
+              const short = p.linkedin_activity_urn.replace(/^urn:li:/, "");
+              return (
+                notificationText.includes(p.linkedin_activity_urn) ||
+                notificationText.includes(short)
+              );
+            }
+            if (p.linkedin_activity_url) {
+              try {
+                const path = new URL(p.linkedin_activity_url).pathname;
+                const last = path.split("/").filter(Boolean).pop() ?? "";
+                return last.length > 6 && (notificationText.includes(last) || linkHref.includes(last));
+              } catch {
+                return notificationText.includes(p.linkedin_activity_url.slice(0, 80));
+              }
+            }
+            return true;
+          }
+
           const raw = await page
             .locator("main")
             .innerText()
             .catch(() => page.locator("body").innerText().catch(() => ""));
           const lower = raw.toLowerCase();
-          const matched = list.filter((rule) => rule.keyword && lower.includes(String(rule.keyword).toLowerCase()));
-          if (!matched.length) {
+          const matchedByKw = list.filter(
+            (rule) => rule.keyword && lower.includes(String(rule.keyword).toLowerCase())
+          );
+          if (!matchedByKw.length) {
             await completeTask(sb, redis, taskId);
             return;
           }
@@ -2461,17 +2705,26 @@ export async function runOneTask(sb: SupabaseClient, redis: RedisClient, taskId:
           const n = await links.count();
           let replied = false;
           for (let i = 0; i < Math.min(n, 25); i++) {
-            const a = links.nth(i);
-            const label = ((await a.innerText().catch(() => "")) + (await a.getAttribute("aria-label").catch(() => ""))).toLowerCase();
-            const rule = matched.find((r) => r.keyword && label.includes(String(r.keyword).toLowerCase()));
+            const aEl = links.nth(i);
+            const href = (await aEl.getAttribute("href")) ?? "";
+            const label = (
+              (await aEl.innerText().catch(() => "")) +
+              (await aEl.getAttribute("aria-label").catch(() => ""))
+            ).toLowerCase();
+            const rule = matchedByKw.find(
+              (r) =>
+                r.keyword &&
+                label.includes(String(r.keyword).toLowerCase()) &&
+                postMatches(r, raw, href)
+            );
             if (!rule) continue;
-            await a.click({ timeout: 8000 }).catch(() => {});
+            await aEl.click({ timeout: 8000 }).catch(() => {});
             await page.waitForLoadState("domcontentloaded", { timeout: 45000 }).catch(() => {});
             await new Promise((r) => setTimeout(r, 1500));
             let reply = (rule.reply_template ?? "").replace(/\{name\}/gi, "there");
             if (rule.use_ai && process.env.GEMINI_API_KEY) {
               const ctx = await page.locator("main").innerText().catch(() => "");
-              reply = await generateDmReply(rule.keyword, ctx.slice(0, 4000));
+              reply = await generateDmReply(String(rule.keyword), ctx.slice(0, 4000));
             }
             if (!reply.trim()) continue;
             const box = page
@@ -2485,17 +2738,108 @@ export async function runOneTask(sb: SupabaseClient, redis: RedisClient, taskId:
             await box.click({ timeout: 5000 }).catch(() => {});
             await box.fill(reply.slice(0, 3000));
             await page.keyboard.press("Enter").catch(() => {});
-            await page.getByRole("button", { name: /post|publicar|enviar comentario|comment/i }).first().click({ timeout: 6000 }).catch(() => {});
+            await page
+              .getByRole("button", { name: /post|publicar|enviar comentario|comment/i })
+              .first()
+              .click({ timeout: 6000 })
+              .catch(() => {});
             await new Promise((r) => setTimeout(r, 2500));
             const postUrl = page.url();
             const um = postUrl.match(/feed\/update\/([^/?#]+)/i) ?? postUrl.match(/ugcPost[^?#]+/i);
             const convId = um?.[1] ? `feed:${um[1].slice(0, 120)}` : `comment:${rule.id}:${Date.now()}`;
             await insertChatRowIfFresh(sb, accountId, convId, reply.slice(0, 800), "out", { rule_id: rule.id });
+            await logInboundCommentEvent(sb, userId, accountId, rule.id, "comment_reply", {
+              post_url: postUrl,
+              keyword: rule.keyword,
+            });
+
+            const dmTpl = String(rule.dm_followup_template ?? "").trim();
+            const wantsDm = dmTpl.length > 0 || Boolean(rule.dm_followup_use_ai);
+            if (wantsDm) {
+              if (!dmTpl && !process.env.GEMINI_API_KEY) {
+                await logInboundCommentEvent(sb, userId, accountId, rule.id, "skip", {
+                  reason: "dm_followup_needs_template_or_gemini",
+                });
+              } else {
+                const msgCap = await checkUnderDailyCap(
+                  redis,
+                  accountId,
+                  "message",
+                  accountDailyCap(account, "message")
+                );
+                if (!msgCap.ok) {
+                  await logInboundCommentEvent(sb, userId, accountId, rule.id, "skip", { reason: "message_cap" });
+                } else {
+                  let dmText = dmTpl.replace(/\{name\}/gi, "there");
+                  if (rule.dm_followup_use_ai && process.env.GEMINI_API_KEY) {
+                    const ctx = await page.locator("main").innerText().catch(() => "");
+                    dmText = await generateDmReply(String(rule.keyword), ctx.slice(0, 4000));
+                  }
+                  if (!dmText.trim()) {
+                    await logInboundCommentEvent(sb, userId, accountId, rule.id, "skip", { reason: "dm_empty" });
+                  } else {
+                    try {
+                      const hrefs = await page
+                        .locator('main a[href*="/in/"]')
+                        .evaluateAll((els) =>
+                          els
+                            .map((e) => (e as HTMLAnchorElement).getAttribute("href") || "")
+                            .filter((h) => h && !h.includes("/in/me") && !h.includes("/in/learning"))
+                        );
+                      let profileUrl: string | null = null;
+                      for (const h of hrefs) {
+                        const abs = h.startsWith("http")
+                          ? h
+                          : `https://www.linkedin.com${h.startsWith("/") ? "" : "/"}${h}`;
+                        if (/linkedin\.com\/in\/[^/?#]+/i.test(abs)) {
+                          profileUrl = abs.split("?")[0];
+                          break;
+                        }
+                      }
+                      if (!profileUrl) {
+                        await logInboundCommentEvent(sb, userId, accountId, rule.id, "skip", {
+                          reason: "no_profile_link",
+                        });
+                      } else {
+                        const rDm = await sendMessageToProfile(page, profileUrl, dmText.slice(0, 8000));
+                        if (rDm.ok) {
+                          await incrementDailyCount(
+                            redis,
+                            accountId,
+                            "message",
+                            accountDailyCap(account, "message")
+                          );
+                          const dmConv = `inbound-dm:${rule.id}:${Date.now()}`;
+                          await insertChatRowIfFresh(sb, accountId, dmConv, dmText.slice(0, 800), "out", {
+                            rule_id: rule.id,
+                          });
+                          await logInboundCommentEvent(sb, userId, accountId, rule.id, "dm_followup", {
+                            profile_url: profileUrl,
+                          });
+                        } else {
+                          await logInboundCommentEvent(sb, userId, accountId, rule.id, "error", {
+                            step: "dm",
+                            error: rDm.error ?? "failed",
+                          });
+                        }
+                      }
+                    } catch (e) {
+                      await logInboundCommentEvent(sb, userId, accountId, rule.id, "error", {
+                        step: "dm",
+                        error: e instanceof Error ? e.message : String(e),
+                      });
+                    }
+                  }
+                }
+              }
+            }
+
             replied = true;
             break;
           }
           if (!replied) {
-            throw new Error("poll_comments_keyword_no_actionable_notification");
+            await completeTask(sb, redis, taskId);
+            return;
           }
           await completeTask(sb, redis, taskId);
         }, pollMs, "poll_comments");
@@ -2503,6 +2847,248 @@ export async function runOneTask(sb: SupabaseClient, redis: RedisClient, taskId:
         const msg = e instanceof Error ? e.message : String(e);
         await fail(msg.slice(0, 500));
       }
+      return;
+    }
+
+    if (action === "import_leads") {
+      const jobId = String(payload.job_id ?? "").trim();
+      if (!jobId) {
+        await fail("import_leads_missing_job_id");
+        return;
+      }
+      const { data: job, error: jobErr } = await sb.from("lead_import_jobs").select("*").eq("id", jobId).maybeSingle();
+      if (jobErr || !job) {
+        await fail("import_job_not_found");
+        return;
+      }
+      const jobUserId = job.user_id as string;
+      if (jobUserId !== (account.user_id as string)) {
+        await fail("import_job_wrong_user");
+        return;
+      }
+      await sb.from("lead_import_jobs").update({ status: "running", updated_at: new Date().toISOString() }).eq("id", jobId);
+
+      const finishFail = async (msg: string) => {
+        await sb.from("lead_import_jobs").update({ status: "failed", error: msg.slice(0, 500), updated_at: new Date().toISOString() }).eq("id", jobId);
+        await fail(msg);
+      };
+
+      const sourceTypeEarly = String(job.source_type ?? "");
+      const jobPayloadEarly = (job.payload ?? {}) as Record<string, unknown>;
+
+      if (sourceTypeEarly === "lead_finder") {
+        const token = (process.env.APIFY_TOKEN ?? "").trim();
+        if (!token) {
+          await finishFail("Falta APIFY_TOKEN en el servidor (.env del backend)");
+          return;
+        }
+        const { DEFAULT_LEAD_ACTOR_ID } = await import("../services/apifyLeadFinder.js");
+        const { executeApifyLeadImport, isApifyImportInFlightError } = await import("../services/apifyLeadImportRun.js");
+        const actorRaw = String(
+          jobPayloadEarly.apify_actor_id ?? process.env.APIFY_LEAD_ACTOR ?? DEFAULT_LEAD_ACTOR_ID
+        ).trim();
+        const actorId = actorRaw.replace(/\//g, "~");
+
+        let apifyInput = jobPayloadEarly.apify_input;
+        if (typeof apifyInput === "string") {
+          try {
+            apifyInput = JSON.parse(apifyInput) as Record<string, unknown>;
+          } catch {
+            await finishFail("payload.apify_input no es JSON válido");
+            return;
+          }
+        }
+        if (!apifyInput || typeof apifyInput !== "object" || Array.isArray(apifyInput)) {
+          await finishFail(
+            "lead_finder requiere payload.apify_input (objeto JSON). Exporta los filtros desde el Lead Viewer de Pipeline Labs o la consola de Apify."
+          );
+          return;
+        }
+
+        const maxWaitMs = Math.min(
+          Math.max(
+            60_000,
+            Number(jobPayloadEarly.apify_max_wait_ms) ||
+              Number(process.env.APIFY_LEAD_MAX_WAIT_MS) ||
+              45 * 60 * 1000
+          ),
+          6 * 60 * 60 * 1000
+        );
+        const insertCap = Math.min(
+          50_000,
+          Math.max(
+            1,
+            Number(jobPayloadEarly.max_insert) ||
+              Number(process.env.APIFY_LEAD_INSERT_CAP) ||
+              2000
+          )
+        );
+
+        let result: Awaited<ReturnType<typeof executeApifyLeadImport>>;
+        try {
+          result = await executeApifyLeadImport({
+            sb,
+            userId: jobUserId,
+            campaignId: (job.campaign_id as string | null) ?? null,
+            apifyToken: token,
+            actorId,
+            apifyInput: apifyInput as Record<string, unknown>,
+            maxWaitMs,
+            insertCap,
+          });
+        } catch (e) {
+          if (isApifyImportInFlightError(e)) {
+            await sb.from("lead_import_jobs").update({ updated_at: new Date().toISOString() }).eq("id", jobId);
+            await sb
+              .from("tasks")
+              .update({
+                status: "pending",
+                scheduled_at: new Date(Date.now() + 20_000).toISOString(),
+                attempts: Math.max(0, (task.attempts as number) - 1),
+              })
+              .eq("id", taskId);
+            const { enqueueTaskDue } = await import("../queues/redisClient.js");
+            await enqueueTaskDue(redis, taskId, Date.now() + 20_000);
+            return;
+          }
+          const msg = e instanceof Error ? e.message : String(e);
+          await finishFail(msg);
+          return;
+        }
+
+        await sb
+          .from("lead_import_jobs")
+          .update({
+            status: "completed",
+            inserted_count: result.newLeads,
+            updated_at: new Date().toISOString(),
+          })
+          .eq("id", jobId);
+        await completeTask(sb, redis, taskId);
+        return;
+      }
+
+      const ses = await ensureLinkedInFeedSession(page);
+      if (ses.softban) {
+        await pauseAccountSoftban(sb, accountId);
+        await sb.from("lead_import_jobs").update({ status: "failed", error: "softban", updated_at: new Date().toISOString() }).eq("id", jobId);
+        await fail("softban");
+        return;
+      }
+      if (!ses.ok) {
+        await finishFail(ses.error ?? "linkedin_session_failed");
+        return;
+      }
+
+      const sourceType = String(job.source_type ?? "");
+      const jobPayload = (job.payload ?? {}) as Record<string, unknown>;
+      let profileUrls: string[] = [];
+
+      const normalizeProfileUrl = (u: string): string | null => {
+        try {
+          const x = new URL(u);
+          if (!x.hostname.replace(/^www\./, "").includes("linkedin.com")) return null;
+          if (!x.pathname.includes("/in/")) return null;
+          const path = x.pathname.replace(/\/$/, "");
+          return `${x.origin}${path}`;
+        } catch {
+          return null;
+        }
+      };
+
+      if (sourceType === "my_list") {
+        const ids = jobPayload.lead_ids as string[] | undefined;
+        const campaignId = job.campaign_id as string | null;
+        if (!ids?.length || !campaignId) {
+          await finishFail("my_list requiere lead_ids y campaign_id");
+          return;
+        }
+        let enrolled = 0;
+        const nextRun = new Date().toISOString();
+        for (const lead_id of ids.slice(0, 2000)) {
+          const { data: lead } = await sb.from("leads").select("id").eq("id", lead_id).eq("user_id", jobUserId).maybeSingle();
+          if (!lead) continue;
+          const { error: enErr } = await sb.from("campaign_enrollments").insert({
+            campaign_id: campaignId,
+            lead_id,
+            current_step_index: 0,
+            next_run_at: nextRun,
+            status: "paused",
+            crm_status: "not_contacted",
+          });
+          if (!enErr) enrolled++;
+        }
+        await sb
+          .from("lead_import_jobs")
+          .update({ status: "completed", inserted_count: enrolled, updated_at: new Date().toISOString() })
+          .eq("id", jobId);
+        await completeTask(sb, redis, taskId);
+        return;
+      }
+
+      if (sourceType === "csv") {
+        const urls = jobPayload.urls as string[] | undefined;
+        const rows = jobPayload.rows as { profile_url?: string }[] | undefined;
+        if (urls?.length) profileUrls = urls.map((u) => normalizeProfileUrl(u)).filter(Boolean) as string[];
+        else if (rows?.length)
+          profileUrls = [...new Set(rows.map((r) => normalizeProfileUrl(String(r.profile_url ?? ""))).filter(Boolean) as string[])];
+      } else {
+        const url = String(jobPayload.url ?? "").trim();
+        if (!url) {
+          await finishFail("Falta url en payload");
+          return;
+        }
+        await page.goto(url, { waitUntil: "domcontentloaded", timeout: 90_000 });
+        await new Promise((r) => setTimeout(r, 2500));
+        const hrefs = await page.$$eval('a[href*="/in/"]', (as) =>
+          [...new Set(as.map((a) => (a as HTMLAnchorElement).href.split("?")[0]))]
+        );
+        profileUrls = [...new Set(hrefs.map((h) => normalizeProfileUrl(h)).filter(Boolean) as string[])].slice(0, 500);
+      }
+
+      if (!profileUrls.length) {
+        await finishFail("No se encontraron perfiles");
+        return;
+      }
+
+      const campaignId = job.campaign_id as string | null;
+      let newLeads = 0;
+      const nextRun = new Date().toISOString();
+      for (const profile_url of profileUrls) {
+        const { data: existing } = await sb
+          .from("leads")
+          .select("id")
+          .eq("user_id", jobUserId)
+          .eq("profile_url", profile_url)
+          .maybeSingle();
+        let leadId = existing?.id as string | undefined;
+        if (!leadId) {
+          const { data: leadRow, error: insLead } = await sb
+            .from("leads")
+            .insert({ profile_url, user_id: jobUserId })
+            .select("id")
+            .single();
+          if (insLead || !leadRow) continue;
+          leadId = leadRow.id as string;
+          newLeads++;
+        }
+        if (campaignId && leadId) {
+          const { error: enErr } = await sb.from("campaign_enrollments").insert({
+            campaign_id: campaignId,
+            lead_id: leadId,
+            current_step_index: 0,
+            next_run_at: nextRun,
+            status: "paused",
+            crm_status: "not_contacted",
+          });
+          void enErr;
+        }
+      }
+      await sb
+        .from("lead_import_jobs")
+        .update({ status: "completed", inserted_count: newLeads, updated_at: new Date().toISOString() })
+        .eq("id", jobId);
+      await completeTask(sb, redis, taskId);
       return;
     }
 
@@ -2514,7 +3100,7 @@ export async function runOneTask(sb: SupabaseClient, redis: RedisClient, taskId:
         return;
       }
       const { conversationId } = normalizeMessagingThreadInput(threadRef);
-      const cap = await checkUnderDailyCap(redis, accountId, "message");
+      const cap = await checkUnderDailyCap(redis, accountId, "message", accountDailyCap(account, "message"));
       if (!cap.ok) {
         const tomorrow = new Date();
         tomorrow.setUTCDate(tomorrow.getUTCDate() + 1);
@@ -2542,7 +3128,7 @@ export async function runOneTask(sb: SupabaseClient, redis: RedisClient, taskId:
         return;
       }
       await insertChatRowIfFresh(sb, accountId, conversationId || threadRef, text, "out");
-      await incrementDailyCount(redis, accountId, "message");
+      await incrementDailyCount(redis, accountId, "message", accountDailyCap(account, "message"));
       await completeTask(sb, redis, taskId);
       return;
     }
@@ -2611,7 +3197,19 @@ export async function processDueTasks(sb: SupabaseClient, redis: RedisClient): P
     MAX_BROWSERS,
     Math.max(1, Number.isFinite(parallelRaw) && parallelRaw > 0 ? Math.floor(parallelRaw) : 1)
   );
-  const batch = orderedIds.slice(0, maxParallel);
+
+  const metaById = new Map(metaList.map((m) => [m.id, m.action]));
+  let importLeadsInBatch = 0;
+  const batch: string[] = [];
+  for (const id of orderedIds) {
+    const action = metaById.get(id);
+    if (action === "import_leads") {
+      if (importLeadsInBatch >= 1) continue;
+      importLeadsInBatch++;
+    }
+    batch.push(id);
+    if (batch.length >= maxParallel) break;
+  }
 
   if (process.env.WORKER_DEBUG === "1" || process.env.WORKER_DEBUG === "true") {
     const { count: pendAll } = await sb.from("tasks").select("id", { count: "exact", head: true }).eq("status", "pending");

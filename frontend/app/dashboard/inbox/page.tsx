@@ -282,11 +282,11 @@ export default function InboxPage() {
   }
 
   return (
-    <div className="flex h-[min(720px,calc(100vh-8rem))] flex-col gap-4 lg:flex-row">
-      <div className="flex w-full flex-col border border-white/10 bg-[var(--surface)] lg:w-72 lg:shrink-0 lg:rounded-lg">
-        <div className="border-b border-white/10 p-3">
+    <div className="flex h-[min(720px,calc(100vh-11rem))] flex-col gap-4 lg:flex-row">
+      <div className="card flex w-full flex-col overflow-hidden p-0 shadow-[var(--shadow-sm)] lg:w-72 lg:shrink-0">
+        <div className="border-b border-[var(--border)] p-3">
           <div className="flex items-baseline justify-between gap-2">
-            <h1 className="text-lg font-semibold">Inbox</h1>
+            <h1 className="page-title text-lg sm:text-xl">Inbox</h1>
             {accountId ? (
               <span className="shrink-0 text-[10px] text-[var(--muted)]">{threads.length} conversaciones</span>
             ) : null}
@@ -304,7 +304,7 @@ export default function InboxPage() {
             <p className="mt-1 text-[10px] text-emerald-200/80">Encolando actualización con LinkedIn…</p>
           )}
           <select
-            className="mt-2 w-full rounded border border-white/10 bg-black/20 px-2 py-1.5 text-sm"
+            className="input-field mt-2 min-h-[2.5rem] py-2 text-sm"
             value={accountId}
             onChange={(e) => {
               setAccountId(e.target.value);
@@ -322,7 +322,7 @@ export default function InboxPage() {
             type="button"
             disabled={busy || !accountId}
             onClick={() => syncNow()}
-            className="mt-2 w-full rounded border border-white/20 py-1.5 text-sm hover:bg-white/5 disabled:opacity-50"
+            className="btn-secondary mt-2 w-full disabled:opacity-50"
           >
             Sincronizar ahora
           </button>
@@ -330,7 +330,7 @@ export default function InboxPage() {
             type="button"
             disabled={busy || !accountId}
             onClick={() => syncNow({ force: true })}
-            className="mt-1 w-full text-left text-[11px] text-[var(--accent)] underline underline-offset-2 disabled:opacity-50"
+            className="link-focus mt-1 w-full rounded-md px-1 py-1 text-left text-[11px] text-[var(--accent)] underline underline-offset-2 disabled:opacity-50"
           >
             Forzar nueva sincronización (cancela la de lista pendiente o en curso)
           </button>
@@ -343,7 +343,7 @@ export default function InboxPage() {
             <p className="p-3 text-sm text-[var(--muted)]">
               Aún no hay conversaciones en la lista. Suele llenarse en uno o varios minutos si el worker está en marcha;
               si no, pulsa «Sincronizar ahora». Si falla, revisa{" "}
-              <Link href="/dashboard/tasks" className="text-[var(--accent)] underline underline-offset-2">
+              <Link href="/dashboard/tasks" className="link-focus rounded-sm text-[var(--accent)] underline underline-offset-2">
                 Tareas
               </Link>{" "}
               y la consola «[inbox_sync]».
@@ -358,7 +358,7 @@ export default function InboxPage() {
                   <button
                     type="button"
                     onClick={() => setSelected(t)}
-                    className={`flex w-full gap-2 border-b border-white/5 px-3 py-2 text-left text-sm hover:bg-white/5 ${active ? "bg-white/10" : ""}`}
+                    className={`flex min-h-10 w-full gap-2 border-b border-[var(--border)] px-3 py-2 text-left text-sm transition-colors hover:bg-[color-mix(in_srgb,var(--text)_5%,var(--surface))] ${active ? "bg-[color-mix(in_srgb,var(--text)_8%,var(--surface))]" : ""}`}
                   >
                     {t.peer_photo_url ? (
                       // eslint-disable-next-line @next/next/no-img-element
@@ -373,7 +373,7 @@ export default function InboxPage() {
                         }}
                       />
                     ) : (
-                      <div className="mt-0.5 size-9 shrink-0 rounded-full bg-white/10" aria-hidden />
+                      <div className="mt-0.5 size-9 shrink-0 rounded-full bg-[color-mix(in_srgb,var(--text)_8%,var(--surface))]" aria-hidden />
                     )}
                     <div className="min-w-0 flex-1">
                       <div className="font-medium">{t.peer_name || t.conversation_id.slice(0, 24)}</div>
@@ -391,14 +391,14 @@ export default function InboxPage() {
         </div>
       </div>
 
-      <div className="flex min-h-0 flex-1 flex-col rounded-lg border border-white/10 bg-[var(--surface)]">
+      <div className="card flex min-h-0 flex-1 flex-col overflow-hidden p-0 shadow-[var(--shadow-sm)]">
         {!selected ? (
           <div className="flex flex-1 items-center justify-center p-6 text-sm text-[var(--muted)]">
             Elige una conversación.
           </div>
         ) : (
           <>
-            <div className="flex items-start gap-3 border-b border-white/10 px-4 py-3">
+            <div className="flex shrink-0 items-start gap-3 border-b border-[var(--border)] px-4 py-3">
               {selected.peer_photo_url ? (
                 // eslint-disable-next-line @next/next/no-img-element
                 <img
@@ -427,8 +427,10 @@ export default function InboxPage() {
                 return (
                   <div
                     key={m.id}
-                    className={`max-w-[85%] rounded-lg px-3 py-2 ${
-                      m.direction === "out" ? "ml-auto bg-[var(--accent)]/25" : "mr-auto bg-white/5"
+                    className={`max-w-[85%] rounded-[var(--radius-md)] px-3 py-2 ${
+                      m.direction === "out"
+                        ? "ml-auto bg-[color-mix(in_srgb,var(--accent)_22%,var(--surface))]"
+                        : "mr-auto bg-[color-mix(in_srgb,var(--text)_6%,var(--surface))]"
                     }`}
                   >
                     {text ? (
@@ -449,7 +451,7 @@ export default function InboxPage() {
                           return (
                             <li
                               key={`${m.id}-att-${i}`}
-                              className="flex flex-wrap items-center gap-2 rounded border border-white/10 bg-black/25 px-2 py-1.5 text-xs"
+                              className="flex flex-wrap items-center gap-2 rounded-[var(--radius-sm)] border border-[var(--border)] bg-[color-mix(in_srgb,var(--bg)_70%,var(--surface))] px-2 py-1.5 text-xs"
                             >
                               <span className="shrink-0 text-[var(--muted)]" aria-hidden>
                                 {a.kind === "pdf" ? "PDF" : a.kind ? a.kind.toUpperCase() : "📎"}
@@ -460,7 +462,7 @@ export default function InboxPage() {
                               {du ? (
                                 <button
                                   type="button"
-                                  className="shrink-0 rounded bg-white/10 px-2 py-0.5 text-[11px] hover:bg-white/15"
+                                  className="btn-secondary min-h-7 shrink-0 px-2 py-0.5 text-[11px]"
                                   onClick={() =>
                                     selected &&
                                     downloadInboxAttachment(selected.account_id, du, a.name).catch((e) =>
@@ -492,19 +494,15 @@ export default function InboxPage() {
                 );
               })}
             </div>
-            <form onSubmit={sendMessage} className="border-t border-white/10 p-3">
+            <form onSubmit={sendMessage} className="shrink-0 border-t border-[var(--border)] p-3">
               {err && <p className="mb-2 text-xs text-red-400">{err}</p>}
               <textarea
-                className="mb-2 min-h-[72px] w-full rounded border border-white/10 bg-black/20 px-2 py-1.5 text-sm"
+                className="input-field mb-2 min-h-[72px] py-2 text-sm"
                 placeholder="Escribe un mensaje…"
                 value={draft}
                 onChange={(e) => setDraft(e.target.value)}
               />
-              <button
-                type="submit"
-                disabled={busy || !draft.trim()}
-                className="rounded-lg bg-[var(--accent)] px-4 py-1.5 text-sm text-white disabled:opacity-50"
-              >
+              <button type="submit" disabled={busy || !draft.trim()} className="btn-primary disabled:opacity-50">
                 Enviar (cola)
               </button>
             </form>

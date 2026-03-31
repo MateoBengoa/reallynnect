@@ -1,6 +1,127 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { enqueueTaskDue, type RedisClient } from "../queues/redisClient.js";
 
+type DaySlot = { day: number; enabled: boolean; start: string; end: string };
+
+function parseSchedule(raw: unknown): DaySlot[] | null {
+  if (!raw || !Array.isArray(raw)) return null;
+  return raw as DaySlot[];
+}
+
+/** Lunes=0 … Domingo=6 (UTC). */
+function utcWeekdayMon0(d: Date): number {
+  const sun0 = d.getUTCDay();
+  return sun0 === 0 ? 6 : sun0 - 1;
+}
+
+function minutesUtc(d: Date): number {
+  return d.getUTCHours() * 60 + d.getUTCMinutes();
+}
+
+function isWithinScheduleNow(schedule: DaySlot[] | null): boolean {
+  if (!schedule?.length) return true;
+  const now = new Date();
+  const wd = utcWeekdayMon0(now);
+  const slot = schedule.find((s) => s.day === wd);
+  if (!slot?.enabled) return false;
+  const sh = Number.parseInt(slot.start.split(":")[0]!, 10);
+  const sm = Number.parseInt(slot.start.split(":")[1] ?? "0", 10);
+  const eh = Number.parseInt(slot.end.split(":")[0]!, 10);
+  const em = Number.parseInt(slot.end.split(":")[1] ?? "0", 10);
+  const cur = minutesUtc(now);
+  return cur >= sh * 60 + sm && cur <= eh * 60 + em;
+}
+
+/** Siguiente instante (ms) en que el calendario UTC permite ejecutar, a partir de `fromMs`. */
+function nextAllowedRunTimeMs(schedule: DaySlot[] | null, fromMs: number): number {
+  if (!schedule?.length) return fromMs;
+  const from = new Date(fromMs);
+  for (let addDays = 0; addDays < 8; addDays++) {
+    const base = new Date(fromMs + addDays * 86400000);
+    if (addDays > 0) base.setUTCHours(0, 0, 0, 0);
+    const wd = utcWeekdayMon0(base);
+    const slot = schedule.find((s) => s.day === wd);
+    if (!slot?.enabled) continue;
+    const sh = Number.parseInt(slot.start.split(":")[0]!, 10);
+    const sm = Number.parseInt(slot.start.split(":")[1] ?? "0", 10);
+    const eh = Number.parseInt(slot.end.split(":")[0]!, 10);
+    const em = Number.parseInt(slot.end.split(":")[1] ?? "0", 10);
+    const startM = sh * 60 + sm;
+    const endM = eh * 60 + em;
+    if (addDays === 0) {
+      const cur = minutesUtc(from);
+      if (cur < startM) {
+        base.setUTCHours(sh, sm, 0, 0);
+        return Math.max(base.getTime(), fromMs);
+      }
+      if (cur <= endM) return fromMs;
+      continue;
+    }
+    base.setUTCHours(sh, sm, 0, 0);
+    return base.getTime();
+  }
+  return fromMs + 3600000;
+}
+
+const ACTION_TO_FREQ_KEY: Record<string, string> = {
+  send_message: "messages",
+  send_message_open_profile: "messages",
+  inmail: "inmails",
+  connect: "connection_requests",
+  comment_post: "ai_comments",
+  like_post: "likes",
+  visit_profile: "profile_visits",
+  follow: "follow_lead",
+  voice_note: "messages",
+  reply_comment: "comments",
+};
+
+function dailyLimitForAction(freq: Record<string, number> | null | undefined, action: string): number {
+  if (!freq || typeof freq !== "object") return 9999;
+  const key = ACTION_TO_FREQ_KEY[action] ?? action;
+  const v = freq[key];
+  return typeof v === "number" && v > 0 ? v : 9999;
+}
+
+async function countTasksActionSince(
+  sb: SupabaseClient,
+  accountId: string,
+  action: string,
+  sinceIso: string
+): Promise<number> {
+  const { count, error } = await sb
+    .from("tasks")
+    .select("id", { count: "exact", head: true })
+    .eq("account_id", accountId)
+    .eq("action", action)
+    .gte("created_at", sinceIso)
+    .in("status", ["pending", "running", "completed"]);
+  if (error) return 0;
+  return count ?? 0;
+}
+
+/** Excluye leads ya en marcha o completados en otra campaña (índice de paso > 0 o completado). */
+export async function filterLeadIdsSkipContactedOtherCampaigns(
+  sb: SupabaseClient,
+  campaignId: string,
+  leadIds: string[]
+): Promise<string[]> {
+  if (!leadIds.length) return [];
+  const { data: rows } = await sb
+    .from("campaign_enrollments")
+    .select("lead_id,status,current_step_index")
+    .neq("campaign_id", campaignId)
+    .in("lead_id", leadIds);
+  const skip = new Set<string>();
+  for (const r of rows ?? []) {
+    const row = r as { lead_id: string; status: string; current_step_index: number };
+    if (row.status === "completed" || (row.status === "active" && row.current_step_index > 0)) {
+      skip.add(row.lead_id);
+    }
+  }
+  return leadIds.filter((id) => !skip.has(id));
+}
+
 /**
  * Limpia cola abierta de la inscripción y reencola «running» como pending.
  * Devuelve cuántas tareas quedaron listas para el worker (reencoladas).
@@ -47,6 +168,7 @@ const STEP_TO_ACTION: Record<string, string> = {
   voice_note: "voice_note",
   reply_comment: "reply_comment",
   inmail: "inmail",
+  wait: "wait",
 };
 
 /** Devuelve true si se insertó una tarea pendiente. */
@@ -63,8 +185,23 @@ export async function scheduleEnrollmentStep(
 
   if (e1 || !en || en.status !== "active") return false;
 
-  const { data: campaign } = await sb.from("campaigns").select("user_id").eq("id", en.campaign_id).single();
+  // Guard: no crear tarea duplicada si ya hay una pending/running para este enrollment
+  const { count: existingCount } = await sb
+    .from("tasks")
+    .select("id", { count: "exact", head: true })
+    .eq("enrollment_id", enrollmentId)
+    .in("status", ["pending", "running"]);
+  if ((existingCount ?? 0) > 0) return false;
+
+  const { data: campaign } = await sb
+    .from("campaigns")
+    .select("user_id, schedule_json, frequency_limits")
+    .eq("id", en.campaign_id)
+    .single();
   if (!campaign) return false;
+
+  const schedule = parseSchedule(campaign.schedule_json);
+  const freq = campaign.frequency_limits as Record<string, number> | null | undefined;
 
   const { data: steps, error: e2 } = await sb
     .from("campaign_steps")
@@ -88,20 +225,45 @@ export async function scheduleEnrollmentStep(
     .select("id")
     .eq("user_id", campaign.user_id)
     .eq("connection_status", "active")
+    .order("rotation_priority", { ascending: true })
     .limit(1);
 
   const accountId = accounts?.[0]?.id;
-  const { data: lead } = await sb.from("leads").select("*").eq("id", en.lead_id).single();
-  if (!accountId || !lead) return false;
+  if (!accountId) return false;
 
-  const runAt = Math.max(new Date(en.next_run_at).getTime(), Date.now());
+  const isWait = action === "wait";
+  const { data: lead } = await sb.from("leads").select("*").eq("id", en.lead_id).single();
+  if (!isWait && !lead) return false;
+
+  let runAt = Math.max(new Date(en.next_run_at).getTime(), Date.now());
+  if (schedule?.length && !isWithinScheduleNow(schedule)) {
+    runAt = nextAllowedRunTimeMs(schedule, runAt);
+  }
+
+  if (!isWait) {
+    const startUtc = new Date();
+    startUtc.setUTCHours(0, 0, 0, 0);
+    const sinceIso = startUtc.toISOString();
+    const limit = dailyLimitForAction(freq, action);
+    const used = await countTasksActionSince(sb, accountId, action, sinceIso);
+    if (used >= limit) {
+      const tomorrow = new Date(startUtc.getTime() + 86400000);
+      runAt = Math.max(runAt, tomorrow.getTime());
+      if (schedule?.length) runAt = nextAllowedRunTimeMs(schedule, runAt);
+    }
+  }
+
   const payload: Record<string, unknown> = {
     step_id: step.id,
     message_template: step.message_template,
-    profile_url: lead.profile_url,
-    lead_name: lead.name,
-    lead_company: lead.company,
-    lead_title: lead.title,
+    ...(lead
+      ? {
+          profile_url: lead.profile_url,
+          lead_name: lead.name,
+          lead_company: lead.company,
+          lead_title: lead.title,
+        }
+      : {}),
   };
 
   const { data: task, error: e3 } = await sb
@@ -109,7 +271,7 @@ export async function scheduleEnrollmentStep(
     .insert({
       account_id: accountId,
       action,
-      lead_id: lead.id,
+      lead_id: lead?.id ?? en.lead_id,
       enrollment_id: enrollmentId,
       scheduled_at: new Date(runAt).toISOString(),
       status: "pending",
@@ -226,6 +388,7 @@ export async function createEnrollmentsAndSchedule(
       const enPatch: Record<string, unknown> = {
         status: "active",
         next_run_at: new Date().toISOString(),
+        crm_status: "in_campaign",
       };
       if (mustRestartFromBeginning) {
         enPatch.current_step_index = 0;
@@ -249,6 +412,7 @@ export async function createEnrollmentsAndSchedule(
         current_step_index: 0,
         next_run_at: nextRun,
         status: "active",
+        crm_status: "in_campaign",
       })
       .select("id")
       .single();

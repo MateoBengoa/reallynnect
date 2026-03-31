@@ -2,7 +2,11 @@ import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { getQueueMode } from "../queues/redisClient.js";
 import { decryptSecret, encryptSecret, maskSecret } from "../lib/crypto.js";
-import { createEnrollmentsAndSchedule, scheduleEnrollmentStep } from "../services/campaignEngine.js";
+import {
+  createEnrollmentsAndSchedule,
+  filterLeadIdsSkipContactedOtherCampaigns,
+  scheduleEnrollmentStep,
+} from "../services/campaignEngine.js";
 import { generateImageBytes, generatePost } from "../services/gemini.js";
 import { pickProxyForAccount } from "../services/proxyAssign.js";
 import { enqueueTask } from "../services/taskQueue.js";
@@ -18,6 +22,23 @@ const liAccountBody = z.object({
   li_at: z.string().min(10),
   proxy_id: z.string().uuid().optional(),
 });
+
+/** Acepta valor puro, `li_at=...` o un fragmento tipo Cookie `...; li_at=...;`. */
+function normalizeLiAt(raw: string): string {
+  let s = raw.trim();
+  if (!s) return s;
+  const fromSetCookie = /(?:^|;\s*)li_at=([^;]+)/i.exec(s);
+  if (fromSetCookie) {
+    try {
+      return decodeURIComponent(fromSetCookie[1]!.trim());
+    } catch {
+      return fromSetCookie[1]!.trim();
+    }
+  }
+  s = s.replace(/^li_at\s*=\s*/i, "").trim();
+  if ((s.startsWith('"') && s.endsWith('"')) || (s.startsWith("'") && s.endsWith("'"))) s = s.slice(1, -1);
+  return s.trim();
+}
 
 const WORKER_ACTIONS_IMPLEMENTED = new Set([
   "verify_session",
@@ -40,6 +61,10 @@ const WORKER_ACTIONS_IMPLEMENTED = new Set([
   "reply_dm",
   "sync_inbox",
   "sync_inbox_thread",
+  "sync_linkedin_posts",
+  "import_leads",
+  "sync_lead_photo",
+  "batch_sync_lead_photos",
 ]);
 
 export async function registerApiRoutes(app: FastifyInstance) {
@@ -204,6 +229,28 @@ export async function registerApiRoutes(app: FastifyInstance) {
     return { profile: data };
   });
 
+  app.patch("/me", async (req, reply) => {
+    const schema = z.object({
+      webhook_url: z.string().max(4000).optional().nullable(),
+      webhook_events: z.array(z.enum(["task.completed", "task.failed"])).optional(),
+      exclude_connect_messages_from_reply_rate: z.boolean().optional(),
+    });
+    const body = schema.parse(req.body ?? {});
+    const patch: Record<string, unknown> = {};
+    if ("webhook_url" in body) {
+      const u = body.webhook_url?.trim() ?? "";
+      patch.webhook_url = u.length ? u : null;
+    }
+    if (body.webhook_events !== undefined) patch.webhook_events = body.webhook_events;
+    if (body.exclude_connect_messages_from_reply_rate !== undefined) {
+      patch.exclude_connect_messages_from_reply_rate = body.exclude_connect_messages_from_reply_rate;
+    }
+    if (!Object.keys(patch).length) return reply.status(400).send({ error: "Nada que actualizar" });
+    const { data, error } = await sb.from("profiles").update(patch).eq("id", req.userId!).select("*").single();
+    if (error) return reply.status(400).send({ error: error.message });
+    return { profile: data };
+  });
+
   app.get("/proxies", async (req) => {
     const { data, error } = await sb.from("proxies").select("id,host,port,username,status,last_used,created_at");
     if (error) throw error;
@@ -233,7 +280,7 @@ export async function registerApiRoutes(app: FastifyInstance) {
     const { data, error } = await sb
       .from("linkedin_accounts")
       .select(
-        "id,proxy_id,warmup_state,softban_status,paused_until,connection_status,last_warmup_at,created_at,li_display_name,li_headline,li_photo_url,session_verified_at"
+        "id,proxy_id,warmup_state,softban_status,paused_until,connection_status,last_warmup_at,created_at,li_display_name,li_headline,li_photo_url,session_verified_at,daily_message_budget,daily_visit_budget,daily_connect_budget,rotation_priority"
       )
       .eq("user_id", req.userId!);
     if (error) throw error;
@@ -242,8 +289,10 @@ export async function registerApiRoutes(app: FastifyInstance) {
 
   app.post("/linkedin-accounts", async (req, reply) => {
     const body = liAccountBody.parse(req.body);
+    const liAt = normalizeLiAt(body.li_at);
+    if (liAt.length < 10) return reply.status(400).send({ error: "li_at inválido o demasiado corto tras normalizar el pegado." });
     const proxyId = body.proxy_id ?? (await pickProxyForAccount(sb));
-    const enc = encryptSecret(body.li_at.trim());
+    const enc = encryptSecret(liAt);
     const { data, error } = await sb
       .from("linkedin_accounts")
       .insert({
@@ -266,6 +315,50 @@ export async function registerApiRoutes(app: FastifyInstance) {
       return reply.status(500).send({ error: "No se pudo crear la tarea de verificación. Revisa logs del backend y la tabla tasks en Supabase." });
     }
     return { id: data!.id, verify_task_id: taskId };
+  });
+
+  app.patch("/linkedin-accounts/:id", async (req, reply) => {
+    const id = (req.params as { id: string }).id;
+    const schema = z.object({
+      daily_message_budget: z.number().int().positive().nullable().optional(),
+      daily_visit_budget: z.number().int().positive().nullable().optional(),
+      daily_connect_budget: z.number().int().positive().nullable().optional(),
+      rotation_priority: z.number().int().optional(),
+      li_at: z.string().min(10).optional(),
+      proxy_id: z.string().uuid().nullable().optional(),
+    });
+    const body = schema.parse(req.body ?? {});
+    const updates: Record<string, unknown> = {};
+    if (body.daily_message_budget !== undefined) updates.daily_message_budget = body.daily_message_budget;
+    if (body.daily_visit_budget !== undefined) updates.daily_visit_budget = body.daily_visit_budget;
+    if (body.daily_connect_budget !== undefined) updates.daily_connect_budget = body.daily_connect_budget;
+    if (body.rotation_priority !== undefined) updates.rotation_priority = body.rotation_priority;
+    if (body.li_at !== undefined) {
+      const liAt = normalizeLiAt(body.li_at);
+      if (liAt.length < 10) return reply.status(400).send({ error: "li_at inválido o demasiado corto tras normalizar el pegado." });
+      updates.li_at_cookie = encryptSecret(liAt);
+      updates.connection_status = "pending";
+    }
+    if (body.proxy_id !== undefined) updates.proxy_id = body.proxy_id;
+    if (!Object.keys(updates).length) return reply.status(400).send({ error: "Nada que actualizar" });
+    const { data: row } = await sb
+      .from("linkedin_accounts")
+      .select("id")
+      .eq("id", id)
+      .eq("user_id", req.userId!)
+      .maybeSingle();
+    if (!row) return reply.status(404).send({ error: "Cuenta no encontrada" });
+    const { data, error } = await sb.from("linkedin_accounts").update(updates).eq("id", id).select("*").single();
+    if (error) return reply.status(400).send({ error: error.message });
+    let verify_task_id: string | null = null;
+    if (body.li_at !== undefined) {
+      verify_task_id = await enqueueTask(sb, redis, {
+        account_id: id,
+        action: "verify_session",
+        payload: {},
+      });
+    }
+    return { account: data, verify_task_id };
   });
 
   app.delete("/linkedin-accounts/:id", async (req, reply) => {
@@ -296,10 +389,200 @@ export async function registerApiRoutes(app: FastifyInstance) {
     return { ok: true, task_id: taskId };
   });
 
-  app.get("/leads", async (req) => {
-    const { data, error } = await sb.from("leads").select("*").eq("user_id", req.userId!).order("created_at", { ascending: false });
-    if (error) throw error;
+  /** Encola scraping de actividad reciente en LinkedIn → filas `posts` (publicados). */
+  app.post("/linkedin-accounts/:id/sync-posts", async (req, reply) => {
+    const id = (req.params as { id: string }).id;
+    const { data: row, error: qErr } = await sb
+      .from("linkedin_accounts")
+      .select("id, connection_status")
+      .eq("id", id)
+      .eq("user_id", req.userId!)
+      .maybeSingle();
+    if (qErr || !row) return reply.status(404).send({ error: "Cuenta no encontrada" });
+    if (row.connection_status !== "active") {
+      return reply.status(400).send({
+        error: "La sesión LinkedIn debe estar activa. Actualiza la cookie o espera la verificación.",
+      });
+    }
+    const taskId = await enqueueTask(sb, redis, {
+      account_id: id,
+      action: "sync_linkedin_posts",
+      payload: {},
+    });
+    if (!taskId) return reply.status(500).send({ error: "No se pudo encolar la sincronización de posts" });
+    return { ok: true, task_id: taskId };
+  });
+
+  app.get("/leads", async (req, reply) => {
+    const { data, error } = await sb
+      .from("leads")
+      .select("*")
+      .eq("user_id", req.userId!)
+      .order("created_at", { ascending: false });
+    if (error) {
+      req.log.warn({ err: error }, "GET /leads");
+      return reply.status(500).send({
+        error: "No se pudo cargar leads",
+        detail: error.message,
+        code: (error as { code?: string }).code,
+      });
+    }
     return { leads: data ?? [] };
+  });
+
+  /**
+   * Rellena photo_url desde la página pública del perfil (Microlink + og:image), sin cookies.
+   */
+  app.post("/leads/fetch-photos", async (req, reply) => {
+    const schema = z.object({
+      max: z.number().int().min(1).max(80).optional().default(40),
+      concurrency: z.number().int().min(1).max(8).optional().default(4),
+    });
+    const body = schema.parse(req.body ?? {});
+    const userId = req.userId!;
+
+    // 1) Limpiar photo_url que sean placeholders conocidos (LinkedIn ghost, unavatar defaults)
+    const { looksLikeRealPersonPhoto } = await import("../services/linkedinLeadPhoto.js");
+    const { data: withPhoto } = await sb
+      .from("leads")
+      .select("id, photo_url")
+      .eq("user_id", userId)
+      .not("photo_url", "is", null)
+      .ilike("profile_url", "%linkedin.com/in/%")
+      .limit(500);
+    let cleaned = 0;
+    for (const row of withPhoto ?? []) {
+      const url = String(row.photo_url ?? "").trim();
+      if (url && !looksLikeRealPersonPhoto(url)) {
+        await sb.from("leads").update({ photo_url: null }).eq("id", row.id).eq("user_id", userId);
+        cleaned++;
+      }
+    }
+    if (cleaned) console.log(`[fetch-photos] Limpiadas ${cleaned} fotos placeholder`);
+
+    // 2) Resolver fotos para leads sin photo_url
+    const { data: rows, error } = await sb
+      .from("leads")
+      .select("id, profile_url")
+      .eq("user_id", userId)
+      .is("photo_url", null)
+      .ilike("profile_url", "%linkedin.com/in/%")
+      .limit(body.max);
+    if (error) throw error;
+    const list = (rows ?? []) as { id: string; profile_url: string }[];
+    if (!list.length) return { updated: 0, attempted: 0, cleaned };
+
+    const { resolveLinkedInProfilePhotoUrl } = await import("../services/linkedinLeadPhoto.js");
+
+    async function runOne(row: { id: string; profile_url: string }): Promise<boolean> {
+      const url = await resolveLinkedInProfilePhotoUrl(row.profile_url, 7000);
+      if (!url) return false;
+      const { error: uErr } = await sb.from("leads").update({ photo_url: url }).eq("id", row.id).eq("user_id", userId);
+      return !uErr;
+    }
+
+    let updated = 0;
+    const conc = body.concurrency;
+    for (let i = 0; i < list.length; i += conc) {
+      const chunk = list.slice(i, i + conc);
+      const okFlags = await Promise.all(chunk.map((r) => runOne(r)));
+      updated += okFlags.filter(Boolean).length;
+    }
+
+    return { updated, attempted: list.length, cleaned };
+  });
+
+  /**
+   * Encola visita al perfil LinkedIn del lead (misma sesión que el worker) para guardar photo_url desde el DOM.
+   * Cuenta contra el cupo diario de "visit" de la cuenta.
+   */
+  app.post("/leads/:id/sync-photo", async (req, reply) => {
+    const id = (req.params as { id: string }).id;
+    const { data: lead } = await sb.from("leads").select("id, profile_url, user_id").eq("id", id).eq("user_id", req.userId!).maybeSingle();
+    if (!lead) return reply.status(404).send({ error: "Lead no encontrado" });
+    const pu = String(lead.profile_url ?? "").trim().toLowerCase();
+    if (!pu.includes("linkedin.com") || !pu.includes("/in/")) {
+      return reply.status(400).send({ error: "El lead necesita una profile_url de perfil LinkedIn (/in/...)" });
+    }
+    const { data: activeLi } = await sb
+      .from("linkedin_accounts")
+      .select("id")
+      .eq("user_id", req.userId!)
+      .eq("connection_status", "active")
+      .order("rotation_priority", { ascending: true })
+      .limit(1)
+      .maybeSingle();
+    if (!activeLi) {
+      return reply.status(400).send({
+        error: "Necesitas una cuenta LinkedIn activa para sincronizar la foto desde el perfil.",
+      });
+    }
+    const taskId = await enqueueTask(sb, redis, {
+      account_id: activeLi.id as string,
+      action: "sync_lead_photo",
+      lead_id: id,
+      enrollment_id: null,
+      payload: { profile_url: lead.profile_url },
+    });
+    if (!taskId) return reply.status(500).send({ error: "No se pudo encolar la tarea" });
+    return { ok: true, task_id: taskId };
+  });
+
+  /**
+   * Una sola tarea worker: una sesión Playwright y varios perfiles seguidos (photo_url desde el DOM).
+   */
+  app.post("/leads/batch-sync-photos", async (req, reply) => {
+    const schema = z.object({
+      max: z.number().int().min(1).max(80).optional().default(40),
+      only_missing: z.boolean().optional().default(true),
+      lead_ids: z.array(z.string().uuid()).max(200).optional(),
+    });
+    const body = schema.parse(req.body ?? {});
+    const userId = req.userId!;
+
+    const { data: activeLi } = await sb
+      .from("linkedin_accounts")
+      .select("id")
+      .eq("user_id", userId)
+      .eq("connection_status", "active")
+      .order("rotation_priority", { ascending: true })
+      .limit(1)
+      .maybeSingle();
+    if (!activeLi) {
+      return reply.status(400).send({
+        error: "Necesitas una cuenta LinkedIn activa para sincronizar fotos desde el perfil.",
+      });
+    }
+
+    let qb = sb
+      .from("leads")
+      .select("id")
+      .eq("user_id", userId)
+      .ilike("profile_url", "%linkedin.com%")
+      .ilike("profile_url", "%/in/%")
+      .order("created_at", { ascending: true });
+    if (body.only_missing) {
+      qb = qb.is("photo_url", null);
+    }
+    if (body.lead_ids?.length) {
+      qb = qb.in("id", body.lead_ids);
+    }
+    const { data: rows, error } = await qb.limit(body.max);
+    if (error) throw error;
+    const ids = (rows ?? []).map((r: { id: string }) => r.id);
+    if (!ids.length) {
+      return { ok: true, task_id: null, queued: 0 };
+    }
+
+    const taskId = await enqueueTask(sb, redis, {
+      account_id: activeLi.id as string,
+      action: "batch_sync_lead_photos",
+      lead_id: null,
+      enrollment_id: null,
+      payload: { lead_ids: ids },
+    });
+    if (!taskId) return reply.status(500).send({ error: "No se pudo encolar la tarea" });
+    return { ok: true, task_id: taskId, queued: ids.length };
   });
 
   app.post("/leads", async (req, reply) => {
@@ -308,6 +591,12 @@ export async function registerApiRoutes(app: FastifyInstance) {
       name: z.string().optional(),
       company: z.string().optional(),
       title: z.string().optional(),
+      headline: z.string().optional(),
+      photo_url: z.string().optional(),
+      location: z.string().optional(),
+      website: z.string().optional(),
+      email: z.string().optional(),
+      phone: z.string().optional(),
     });
     const body = schema.parse(req.body);
     const { data, error } = await sb
@@ -319,15 +608,385 @@ export async function registerApiRoutes(app: FastifyInstance) {
     return { lead: data };
   });
 
-  app.post("/leads/import", async (req, reply) => {
+  app.patch("/leads/:id", async (req, reply) => {
+    const id = (req.params as { id: string }).id;
     const schema = z.object({
-      urls: z.array(z.string().url()).max(500),
+      name: z.string().optional().nullable(),
+      company: z.string().optional().nullable(),
+      title: z.string().optional().nullable(),
+      headline: z.string().optional().nullable(),
+      photo_url: z.string().optional().nullable(),
+      location: z.string().optional().nullable(),
+      website: z.string().optional().nullable(),
+      email: z.string().optional().nullable(),
+      phone: z.string().optional().nullable(),
+      is_blacklisted: z.boolean().optional(),
     });
+    const body = schema.parse(req.body ?? {});
+    const { data: row } = await sb.from("leads").select("id").eq("id", id).eq("user_id", req.userId!).maybeSingle();
+    if (!row) return reply.status(404).send({ error: "Not found" });
+    const { data, error } = await sb.from("leads").update(body).eq("id", id).select("*").single();
+    if (error) return reply.status(400).send({ error: error.message });
+    return { lead: data };
+  });
+
+  app.post("/leads/import", async (req, reply) => {
+    const rowSchema = z.object({
+      profile_url: z.string().url(),
+      name: z.string().optional(),
+      company: z.string().optional(),
+      title: z.string().optional(),
+      headline: z.string().optional(),
+      photo_url: z.string().optional(),
+      location: z.string().optional(),
+      source: z.string().max(500).optional(),
+      notes: z.string().max(4000).optional(),
+    });
+    const schema = z.union([
+      z.object({ urls: z.array(z.string().url()).max(2000), campaign_id: z.string().uuid().optional() }),
+      z.object({ rows: z.array(rowSchema).max(2000), campaign_id: z.string().uuid().optional() }),
+    ]);
     const body = schema.parse(req.body);
-    const rows = body.urls.map((profile_url) => ({ profile_url, user_id: req.userId! }));
+    const campaignId = body.campaign_id;
+    if (campaignId) {
+      const { data: camp } = await sb.from("campaigns").select("id").eq("id", campaignId).eq("user_id", req.userId!).maybeSingle();
+      if (!camp) return reply.status(404).send({ error: "Campaña no encontrada" });
+    }
+    const rows =
+      "urls" in body
+        ? body.urls.map((profile_url) => ({ profile_url, user_id: req.userId! }))
+        : body.rows.map((r) => ({ ...r, user_id: req.userId! }));
     const { data, error } = await sb.from("leads").insert(rows).select("id");
     if (error) return reply.status(400).send({ error: error.message });
-    return { inserted: data?.length ?? 0 };
+    const insertedIds = (data ?? []).map((r: { id: string }) => r.id);
+    if (campaignId && insertedIds.length) {
+      const nextRun = new Date().toISOString();
+      for (const lead_id of insertedIds) {
+        const { error: enErr } = await sb.from("campaign_enrollments").insert({
+          campaign_id: campaignId,
+          lead_id,
+          current_step_index: 0,
+          next_run_at: nextRun,
+          status: "paused",
+          crm_status: "not_contacted",
+        });
+        if (enErr && !String(enErr.message).includes("duplicate")) {
+          /* ignore unique violation */
+        }
+      }
+    }
+    return { inserted: insertedIds.length };
+  });
+
+  /**
+   * Ejecuta Apify en este proceso (no requiere worker). La petición puede durar minutos.
+   * El cliente debe usar un timeout largo (p. ej. AbortSignal.timeout 50 min).
+   */
+  app.post("/leads/apify-import", async (req, reply) => {
+    const apifyToken = (process.env.APIFY_TOKEN ?? "").trim();
+    if (!apifyToken) {
+      return reply.status(400).send({ error: "Falta APIFY_TOKEN en el servidor (backend/.env)" });
+    }
+
+    const schema = z.object({
+      apify_input: z.record(z.unknown()),
+      apify_actor_id: z.string().optional(),
+      campaign_id: z.string().uuid().optional(),
+      max_wait_ms: z.number().int().min(60_000).max(6 * 60 * 60 * 1000).optional(),
+      max_insert: z.number().int().min(1).max(50_000).optional(),
+    });
+
+    let body: z.infer<typeof schema>;
+    try {
+      body = schema.parse(req.body);
+    } catch (e) {
+      const msg = e instanceof z.ZodError ? e.flatten() : String(e);
+      return reply.status(400).send({ error: "Body inválido", detail: msg });
+    }
+
+    if (body.campaign_id) {
+      const { data: camp } = await sb
+        .from("campaigns")
+        .select("id")
+        .eq("id", body.campaign_id)
+        .eq("user_id", req.userId!)
+        .maybeSingle();
+      if (!camp) return reply.status(404).send({ error: "Campaña no encontrada" });
+    }
+
+    const { DEFAULT_LEAD_ACTOR_ID } = await import("../services/apifyLeadFinder.js");
+    const { executeApifyLeadImport, isApifyImportInFlightError } = await import("../services/apifyLeadImportRun.js");
+    const actorRaw = String(body.apify_actor_id ?? process.env.APIFY_LEAD_ACTOR ?? DEFAULT_LEAD_ACTOR_ID).trim();
+    const actorId = actorRaw.replace(/\//g, "~");
+
+    const apifyInput = body.apify_input as Record<string, unknown>;
+
+    const envWait = Number(process.env.APIFY_LEAD_MAX_WAIT_MS);
+    const defaultWait =
+      Number.isFinite(envWait) && envWait >= 60_000 ? envWait : 45 * 60 * 1000;
+    const maxWaitMs = Math.min(
+      Math.max(60_000, body.max_wait_ms ?? defaultWait),
+      6 * 60 * 60 * 1000
+    );
+
+    const envCap = Number(process.env.APIFY_LEAD_INSERT_CAP);
+    const defaultCap = Number.isFinite(envCap) && envCap >= 1 ? envCap : 2000;
+    const insertCap = Math.min(50_000, Math.max(1, body.max_insert ?? defaultCap));
+
+    try {
+      const result = await executeApifyLeadImport({
+        sb,
+        userId: req.userId!,
+        campaignId: body.campaign_id ?? null,
+        apifyToken,
+        actorId,
+        apifyInput,
+        maxWaitMs,
+        insertCap,
+      });
+      return {
+        ok: true,
+        new_leads: result.newLeads,
+        rows_with_linkedin: result.rowsWithLinkedIn,
+        dataset_items: result.datasetSize,
+        photos_resolved: result.photosResolved,
+      };
+    } catch (e) {
+      if (isApifyImportInFlightError(e)) {
+        const msg = e instanceof Error ? e.message : String(e);
+        return reply.status(409).send({ error: msg });
+      }
+      const msg = e instanceof Error ? e.message : String(e);
+      req.log.warn({ err: msg }, "apify-import failed");
+      return reply.status(502).send({ error: msg });
+    }
+  });
+
+  const stepTypeEnum = z.enum([
+    "visit_profile",
+    "connect",
+    "send_message",
+    "send_message_open_profile",
+    "follow",
+    "like_post",
+    "comment_post",
+    "voice_note",
+    "reply_comment",
+    "inmail",
+  ]);
+
+  const importJobBodySchema = z.object({
+    source_type: z.enum([
+      "my_list",
+      "linkedin_search",
+      "sales_navigator",
+      "lead_finder",
+      "csv",
+      "linkedin_event",
+      "linkedin_post",
+      "linkedin_group",
+    ]),
+    campaign_id: z.string().uuid().optional(),
+    payload: z.record(z.unknown()).default({}),
+  });
+
+  type CreateLeadImportJobOk =
+    | { ok: true; job_id: string; task_id: string }
+    | {
+        ok: true;
+        job_id: string;
+        task_id: null;
+        inline_apify: true;
+        new_leads: number;
+        rows_with_linkedin: number;
+        dataset_items: number;
+      };
+
+  async function createLeadImportJob(
+    userId: string,
+    rawBody: unknown,
+    forcedCampaignId?: string
+  ): Promise<CreateLeadImportJobOk | { ok: false; status: number; error: string }> {
+    const merged =
+      typeof rawBody === "object" && rawBody !== null
+        ? { ...(rawBody as Record<string, unknown>), ...(forcedCampaignId ? { campaign_id: forcedCampaignId } : {}) }
+        : forcedCampaignId
+          ? { campaign_id: forcedCampaignId }
+          : rawBody;
+    const body = importJobBodySchema.parse(merged);
+    if (body.campaign_id) {
+      const { data: camp } = await sb.from("campaigns").select("id").eq("id", body.campaign_id).eq("user_id", userId).maybeSingle();
+      if (!camp) return { ok: false, status: 404, error: "Campaña no encontrada" };
+    }
+    const { data: job, error: jErr } = await sb
+      .from("lead_import_jobs")
+      .insert({
+        user_id: userId,
+        campaign_id: body.campaign_id ?? null,
+        source_type: body.source_type,
+        payload: body.payload,
+        status: "pending",
+      })
+      .select("id")
+      .single();
+    if (jErr || !job) return { ok: false, status: 400, error: jErr?.message ?? "No se creó el job" };
+
+    const isApifyLeadFinder =
+      body.source_type === "lead_finder" && Boolean(process.env.APIFY_TOKEN?.trim());
+
+    if (body.source_type === "lead_finder" && !process.env.APIFY_TOKEN?.trim()) {
+      await sb
+        .from("lead_import_jobs")
+        .update({ status: "failed", error: "Falta APIFY_TOKEN en el servidor" })
+        .eq("id", job.id);
+      return {
+        ok: false,
+        status: 400,
+        error: "Lead finder (Apify): configura APIFY_TOKEN en backend/.env. Crea un token en console.apify.com/account/integrations",
+      };
+    }
+
+    /** Lead finder: ejecutar Apify en esta petición (visible en Apify Console). No usa cola ni sesión LinkedIn. */
+    if (isApifyLeadFinder) {
+      const apifyToken = process.env.APIFY_TOKEN!.trim();
+      const jobPayload = body.payload as Record<string, unknown>;
+      let apifyInput: unknown = jobPayload.apify_input;
+      if (typeof apifyInput === "string") {
+        try {
+          apifyInput = JSON.parse(apifyInput) as Record<string, unknown>;
+        } catch {
+          await sb
+            .from("lead_import_jobs")
+            .update({ status: "failed", error: "apify_input JSON inválido", updated_at: new Date().toISOString() })
+            .eq("id", job.id);
+          return { ok: false, status: 400, error: "payload.apify_input no es JSON válido" };
+        }
+      }
+      if (!apifyInput || typeof apifyInput !== "object" || Array.isArray(apifyInput)) {
+        await sb
+          .from("lead_import_jobs")
+          .update({
+            status: "failed",
+            error: "Falta payload.apify_input (objeto)",
+            updated_at: new Date().toISOString(),
+          })
+          .eq("id", job.id);
+        return {
+          ok: false,
+          status: 400,
+          error:
+            "Lead finder requiere payload.apify_input (objeto). Usa la tarjeta «Apify» en Importar contactos o POST /leads/apify-import.",
+        };
+      }
+
+      const { DEFAULT_LEAD_ACTOR_ID } = await import("../services/apifyLeadFinder.js");
+      const { executeApifyLeadImport, isApifyImportInFlightError } = await import("../services/apifyLeadImportRun.js");
+      const actorRaw = String(
+        jobPayload.apify_actor_id ?? process.env.APIFY_LEAD_ACTOR ?? DEFAULT_LEAD_ACTOR_ID
+      ).trim();
+      const actorId = actorRaw.replace(/\//g, "~");
+
+      const envWait = Number(process.env.APIFY_LEAD_MAX_WAIT_MS);
+      const defaultWait =
+        Number.isFinite(envWait) && envWait >= 60_000 ? envWait : 45 * 60 * 1000;
+      const maxWaitMs = Math.min(
+        Math.max(60_000, Number(jobPayload.apify_max_wait_ms) || defaultWait),
+        6 * 60 * 60 * 1000
+      );
+      const envCap = Number(process.env.APIFY_LEAD_INSERT_CAP);
+      const defaultCap = Number.isFinite(envCap) && envCap >= 1 ? envCap : 2000;
+      const insertCap = Math.min(50_000, Math.max(1, Number(jobPayload.max_insert) || defaultCap));
+
+      try {
+        const result = await executeApifyLeadImport({
+          sb,
+          userId,
+          campaignId: body.campaign_id ?? null,
+          apifyToken,
+          actorId,
+          apifyInput: apifyInput as Record<string, unknown>,
+          maxWaitMs,
+          insertCap,
+        });
+        await sb
+          .from("lead_import_jobs")
+          .update({
+            status: "completed",
+            inserted_count: result.newLeads,
+            error: null,
+            updated_at: new Date().toISOString(),
+          })
+          .eq("id", job.id);
+        return {
+          ok: true,
+          job_id: job.id,
+          task_id: null,
+          inline_apify: true,
+          new_leads: result.newLeads,
+          rows_with_linkedin: result.rowsWithLinkedIn,
+          dataset_items: result.datasetSize,
+        };
+      } catch (e) {
+        if (isApifyImportInFlightError(e)) {
+          const msg = e instanceof Error ? e.message : String(e);
+          await sb
+            .from("lead_import_jobs")
+            .update({ status: "failed", error: msg.slice(0, 500), updated_at: new Date().toISOString() })
+            .eq("id", job.id);
+          return { ok: false, status: 409, error: msg };
+        }
+        const msg = (e instanceof Error ? e.message : String(e)).slice(0, 500);
+        await sb
+          .from("lead_import_jobs")
+          .update({ status: "failed", error: msg, updated_at: new Date().toISOString() })
+          .eq("id", job.id);
+        return { ok: false, status: 502, error: msg };
+      }
+    }
+
+    let queueAccountId: string | null = null;
+    const { data: activeLi } = await sb
+      .from("linkedin_accounts")
+      .select("id")
+      .eq("user_id", userId)
+      .eq("connection_status", "active")
+      .order("rotation_priority", { ascending: true })
+      .limit(1)
+      .maybeSingle();
+    if (activeLi) queueAccountId = activeLi.id as string;
+
+    if (!queueAccountId) {
+      const errMsg = "No hay cuenta LinkedIn activa para importar desde URL";
+      await sb.from("lead_import_jobs").update({ status: "failed", error: errMsg }).eq("id", job.id);
+      return { ok: false, status: 400, error: errMsg };
+    }
+
+    const taskId = await enqueueTask(sb, redis, {
+      account_id: queueAccountId,
+      action: "import_leads",
+      payload: { job_id: job.id },
+    });
+    if (!taskId) {
+      await sb.from("lead_import_jobs").update({ status: "failed", error: "No se pudo encolar tarea" }).eq("id", job.id);
+      return { ok: false, status: 500, error: "Cola no disponible" };
+    }
+    return { ok: true, job_id: job.id, task_id: taskId };
+  }
+
+  app.post("/leads/import-job", async (req, reply) => {
+    const r = await createLeadImportJob(req.userId!, req.body);
+    if (!r.ok) return reply.status(r.status).send({ error: r.error });
+    if ("inline_apify" in r && r.inline_apify) {
+      return {
+        job_id: r.job_id,
+        task_id: null,
+        inline_apify: true,
+        new_leads: r.new_leads,
+        rows_with_linkedin: r.rows_with_linkedin,
+        dataset_items: r.dataset_items,
+      };
+    }
+    return { job_id: r.job_id, task_id: r.task_id };
   });
 
   app.get("/campaigns", async (req) => {
@@ -342,6 +1001,192 @@ export async function registerApiRoutes(app: FastifyInstance) {
     const { data, error } = await sb.from("campaigns").insert({ name: body.name, user_id: req.userId! }).select("*").single();
     if (error) return reply.status(400).send({ error: error.message });
     return { campaign: data };
+  });
+
+  app.get("/campaigns/:id/enrollments", async (req, reply) => {
+    const id = (req.params as { id: string }).id;
+    const { data: c } = await sb.from("campaigns").select("id").eq("id", id).eq("user_id", req.userId!).single();
+    if (!c) return reply.status(404).send({ error: "Not found" });
+    const { data, error } = await sb
+      .from("campaign_enrollments")
+      .select("*, leads (*)")
+      .eq("campaign_id", id);
+    if (error) throw error;
+    return { enrollments: data ?? [] };
+  });
+
+  app.patch("/campaigns/:id/enrollments/:enrollmentId", async (req, reply) => {
+    const { id, enrollmentId } = req.params as { id: string; enrollmentId: string };
+    const schema = z.object({ crm_status: z.enum([
+      "not_contacted", "in_campaign", "contacted", "replied", "not_accepted", "blacklist", "duplicate", "failed",
+    ]) });
+    const body = schema.parse(req.body);
+    const { data: en } = await sb
+      .from("campaign_enrollments")
+      .select("id, campaign_id")
+      .eq("id", enrollmentId)
+      .eq("campaign_id", id)
+      .maybeSingle();
+    if (!en) return reply.status(404).send({ error: "Not found" });
+    const { data: camp } = await sb.from("campaigns").select("id").eq("id", id).eq("user_id", req.userId!).single();
+    if (!camp) return reply.status(404).send({ error: "Not found" });
+    const { data, error } = await sb
+      .from("campaign_enrollments")
+      .update({ crm_status: body.crm_status })
+      .eq("id", enrollmentId)
+      .select("*, leads (*)")
+      .single();
+    if (error) return reply.status(400).send({ error: error.message });
+    return { enrollment: data };
+  });
+
+  app.post("/campaigns/:id/enrollments", async (req, reply) => {
+    const id = (req.params as { id: string }).id;
+    const schema = z.object({ lead_ids: z.array(z.string().uuid()).min(1).max(2000) });
+    const body = schema.parse(req.body);
+    const { data: camp } = await sb.from("campaigns").select("id").eq("id", id).eq("user_id", req.userId!).single();
+    if (!camp) return reply.status(404).send({ error: "Not found" });
+    const nextRun = new Date().toISOString();
+    let added = 0;
+    for (const lead_id of body.lead_ids) {
+      const { data: lead } = await sb.from("leads").select("id").eq("id", lead_id).eq("user_id", req.userId!).maybeSingle();
+      if (!lead) continue;
+      const { error: insErr } = await sb.from("campaign_enrollments").insert({
+        campaign_id: id,
+        lead_id,
+        current_step_index: 0,
+        next_run_at: nextRun,
+        status: "paused",
+        crm_status: "not_contacted",
+      });
+      if (!insErr) added++;
+    }
+    return { added };
+  });
+
+  app.get("/campaigns/:id/analytics", async (req, reply) => {
+    const id = (req.params as { id: string }).id;
+    const { data: c } = await sb.from("campaigns").select("id").eq("id", id).eq("user_id", req.userId!).single();
+    if (!c) return reply.status(404).send({ error: "Not found" });
+    const { data: ens } = await sb.from("campaign_enrollments").select("id").eq("campaign_id", id);
+    const eids = (ens ?? []).map((e: { id: string }) => e.id);
+    if (!eids.length) {
+      return {
+        summary: {
+          tasks_by_action: {},
+          invites_sent: 0,
+          messages_sent: 0,
+          inmails_sent: 0,
+          likes: 0,
+          comments: 0,
+          profile_visits: 0,
+          accepts_pct: null,
+          replies_pct: null,
+          open_messages_est: 0,
+        },
+        series: [],
+      };
+    }
+    const since = new Date(Date.now() - 30 * 86400000).toISOString();
+    const { data: tasks } = await sb
+      .from("tasks")
+      .select("id, action, status, created_at, enrollment_id")
+      .in("enrollment_id", eids)
+      .gte("created_at", since);
+    const byAction: Record<string, number> = {};
+    for (const t of tasks ?? []) {
+      const a = (t as { action: string }).action;
+      byAction[a] = (byAction[a] ?? 0) + 1;
+    }
+    const completed = (tasks ?? []).filter((t: { status: string }) => t.status === "completed");
+    const invites = completed.filter((t: { action: string }) => t.action === "connect").length;
+    const msgs = completed.filter((t: { action: string }) =>
+      ["send_message", "send_message_open_profile"].includes(t.action)
+    ).length;
+    const inmails = completed.filter((t: { action: string }) => t.action === "inmail").length;
+    const likes = completed.filter((t: { action: string }) => t.action === "like_post").length;
+    const comments = completed.filter((t: { action: string }) => t.action === "comment_post").length;
+    const visits = completed.filter((t: { action: string }) => t.action === "visit_profile").length;
+    const enrollTotal = eids.length;
+    const { count: repliedCount } = await sb
+      .from("campaign_enrollments")
+      .select("id", { count: "exact", head: true })
+      .eq("campaign_id", id)
+      .eq("crm_status", "replied");
+    const acceptsPct = enrollTotal ? Math.round(((repliedCount ?? 0) / enrollTotal) * 1000) / 10 : null;
+    const repliesPct = msgs ? Math.round(((repliedCount ?? 0) / msgs) * 1000) / 10 : null;
+    return {
+      summary: {
+        tasks_by_action: byAction,
+        linkedin_requests: invites,
+        linkedin_conversations: msgs,
+        linkedin_open_messages_est: msgs,
+        linkedin_likes: likes,
+        linkedin_comments: comments,
+        linkedin_inmails_sent: inmails,
+        profile_visits: visits,
+        accepted_invite_pct: acceptsPct,
+        linkedin_replies_pct: repliesPct,
+      },
+      note: "Porcentajes aproximados según crm_status=replied y tareas completadas; afinar con eventos dedicados.",
+    };
+  });
+
+  app.post("/campaigns/:id/import-job", async (req, reply) => {
+    const id = (req.params as { id: string }).id;
+    const { data: camp } = await sb.from("campaigns").select("id").eq("id", id).eq("user_id", req.userId!).single();
+    if (!camp) return reply.status(404).send({ error: "Not found" });
+    const r = await createLeadImportJob(req.userId!, req.body, id);
+    if (!r.ok) return reply.status(r.status).send({ error: r.error });
+    if ("inline_apify" in r && r.inline_apify) {
+      return {
+        job_id: r.job_id,
+        task_id: null,
+        inline_apify: true,
+        new_leads: r.new_leads,
+        rows_with_linkedin: r.rows_with_linkedin,
+        dataset_items: r.dataset_items,
+      };
+    }
+    return { job_id: r.job_id, task_id: r.task_id };
+  });
+
+  app.get("/campaigns/:id", async (req, reply) => {
+    const id = (req.params as { id: string }).id;
+    const { data, error } = await sb.from("campaigns").select("*").eq("id", id).eq("user_id", req.userId!).single();
+    if (error || !data) return reply.status(404).send({ error: "Not found" });
+    return { campaign: data };
+  });
+
+  app.patch("/campaigns/:id", async (req, reply) => {
+    const id = (req.params as { id: string }).id;
+    const schema = z.object({
+      name: z.string().min(1).optional(),
+      skip_contacted_other_campaigns: z.boolean().optional(),
+      schedule_json: z.array(z.object({
+        day: z.number().int().min(0).max(6),
+        enabled: z.boolean(),
+        start: z.string(),
+        end: z.string(),
+      })).optional(),
+      frequency_limits: z.record(z.number()).optional(),
+      workflow_edges: z.array(z.record(z.unknown())).optional(),
+    });
+    const body = schema.parse(req.body ?? {});
+    const { data: c } = await sb.from("campaigns").select("id").eq("id", id).eq("user_id", req.userId!).maybeSingle();
+    if (!c) return reply.status(404).send({ error: "Not found" });
+    const patch: Record<string, unknown> = { ...body };
+    if (!Object.keys(patch).length) return reply.status(400).send({ error: "Nada que actualizar" });
+    const { data, error } = await sb.from("campaigns").update(patch).eq("id", id).select("*").single();
+    if (error) return reply.status(400).send({ error: error.message });
+    return { campaign: data };
+  });
+
+  app.delete("/campaigns/:id", async (req, reply) => {
+    const id = (req.params as { id: string }).id;
+    const { error } = await sb.from("campaigns").delete().eq("id", id).eq("user_id", req.userId!);
+    if (error) return reply.status(400).send({ error: error.message });
+    return { ok: true };
   });
 
   app.get("/campaigns/:id/steps", async (req, reply) => {
@@ -359,26 +1204,22 @@ export async function registerApiRoutes(app: FastifyInstance) {
     if (!c) return reply.status(404).send({ error: "Not found" });
 
     const schema = z.object({
+      workflow_edges: z.array(z.record(z.unknown())).optional(),
       steps: z.array(
         z.object({
-          step_type: z.enum([
-            "visit_profile",
-            "connect",
-            "send_message",
-            "send_message_open_profile",
-            "follow",
-            "like_post",
-            "comment_post",
-            "voice_note",
-            "reply_comment",
-            "inmail",
-          ]),
+          step_type: stepTypeEnum,
           delay_hours: z.number().int().min(0),
           message_template: z.string().optional(),
+          position_x: z.number().nullable().optional(),
+          position_y: z.number().nullable().optional(),
         })
       ),
     });
     const body = schema.parse(req.body);
+    if (body.workflow_edges !== undefined) {
+      const { error: e2 } = await sb.from("campaigns").update({ workflow_edges: body.workflow_edges }).eq("id", id);
+      if (e2) return reply.status(400).send({ error: e2.message });
+    }
     await sb.from("campaign_steps").delete().eq("campaign_id", id);
     const rows = body.steps.map((s, i) => ({
       campaign_id: id,
@@ -386,10 +1227,13 @@ export async function registerApiRoutes(app: FastifyInstance) {
       step_type: s.step_type,
       delay_hours: s.delay_hours,
       message_template: s.message_template ?? null,
+      position_x: s.position_x ?? null,
+      position_y: s.position_y ?? null,
     }));
     const { error } = await sb.from("campaign_steps").insert(rows);
     if (error) return reply.status(400).send({ error: error.message });
-    return { ok: true };
+    const { data: steps } = await sb.from("campaign_steps").select("*").eq("campaign_id", id).order("step_order", { ascending: true });
+    return { ok: true, steps: steps ?? [] };
   });
 
   app.post("/campaigns/:id/start", async (req, reply) => {
@@ -397,7 +1241,12 @@ export async function registerApiRoutes(app: FastifyInstance) {
     const schema = z.object({ lead_ids: z.array(z.string().uuid()).optional() });
     const body = schema.parse(req.body ?? {});
 
-    const { data: camp } = await sb.from("campaigns").select("id").eq("id", id).eq("user_id", req.userId!).single();
+    const { data: camp } = await sb
+      .from("campaigns")
+      .select("id, skip_contacted_other_campaigns")
+      .eq("id", id)
+      .eq("user_id", req.userId!)
+      .single();
     if (!camp) return reply.status(404).send({ error: "Not found" });
 
     const { data: activeLi } = await sb
@@ -405,6 +1254,7 @@ export async function registerApiRoutes(app: FastifyInstance) {
       .select("id")
       .eq("user_id", req.userId!)
       .eq("connection_status", "active")
+      .order("rotation_priority", { ascending: true })
       .limit(1)
       .maybeSingle();
     if (!activeLi) {
@@ -417,6 +1267,9 @@ export async function registerApiRoutes(app: FastifyInstance) {
     if (!leadIds?.length) {
       const { data: leads } = await sb.from("leads").select("id").eq("user_id", req.userId!);
       leadIds = leads?.map((l) => l.id) ?? [];
+    }
+    if (camp.skip_contacted_other_campaigns) {
+      leadIds = await filterLeadIdsSkipContactedOtherCampaigns(sb, id, leadIds);
     }
     if (!leadIds.length) return reply.status(400).send({ error: "No leads" });
 
@@ -456,9 +1309,59 @@ export async function registerApiRoutes(app: FastifyInstance) {
     const { data: accounts } = await sb.from("linkedin_accounts").select("id").eq("user_id", req.userId!);
     const ids = accounts?.map((a) => a.id) ?? [];
     if (!ids.length) return { posts: [] };
-    const { data, error } = await sb.from("posts").select("*").in("account_id", ids).order("created_at", { ascending: false });
+    const { data, error } = await sb
+      .from("posts")
+      .select("*")
+      .in("account_id", ids)
+      .order("created_at", { ascending: false })
+      .limit(5000);
     if (error) throw error;
     return { posts: data ?? [] };
+  });
+
+  app.post("/posts", async (req, reply) => {
+    const schema = z.object({
+      account_id: z.string().uuid(),
+      content: z.string().min(1),
+      image_url: z.string().nullable().optional(),
+    });
+    const body = schema.parse(req.body);
+    const { data: acc } = await sb
+      .from("linkedin_accounts")
+      .select("id")
+      .eq("id", body.account_id)
+      .eq("user_id", req.userId!)
+      .maybeSingle();
+    if (!acc) return reply.status(404).send({ error: "Cuenta no encontrada" });
+    const { data: post, error } = await sb
+      .from("posts")
+      .insert({
+        account_id: body.account_id,
+        content: body.content,
+        image_url: body.image_url ?? null,
+        status: "draft",
+      })
+      .select("*")
+      .single();
+    if (error) return reply.status(400).send({ error: error.message });
+    return { post };
+  });
+
+  app.patch("/posts/:id", async (req, reply) => {
+    const id = (req.params as { id: string }).id;
+    const schema = z.object({
+      content: z.string().min(1).optional(),
+      image_url: z.string().nullable().optional(),
+    });
+    const body = schema.parse(req.body ?? {});
+    const { data: post } = await sb.from("posts").select("id, account_id, status").eq("id", id).maybeSingle();
+    if (!post) return reply.status(404).send({ error: "Not found" });
+    const { data: acc } = await sb.from("linkedin_accounts").select("user_id").eq("id", post.account_id).single();
+    if (!acc || acc.user_id !== req.userId) return reply.status(404).send({ error: "Not found" });
+    if (post.status !== "draft") return reply.status(400).send({ error: "Solo se editan borradores" });
+    const { data, error } = await sb.from("posts").update(body).eq("id", id).select("*").single();
+    if (error) return reply.status(400).send({ error: error.message });
+    return { post: data };
   });
 
   app.post("/posts/generate", async (req, reply) => {
@@ -536,9 +1439,85 @@ export async function registerApiRoutes(app: FastifyInstance) {
       reply_template: z.string().min(1),
       rule_type: z.enum(["dm", "comment"]).default("dm"),
       use_ai: z.boolean().optional(),
+      is_active: z.boolean().optional(),
+      account_id: z.string().uuid().nullable().optional(),
+      post_id: z.string().uuid().nullable().optional(),
+      dm_followup_template: z.string().nullable().optional(),
+      dm_followup_use_ai: z.boolean().optional(),
     });
     const body = schema.parse(req.body);
-    const { data, error } = await sb.from("keyword_rules").insert({ ...body, user_id: req.userId! }).select("*").single();
+    if (body.account_id) {
+      const { data: a } = await sb
+        .from("linkedin_accounts")
+        .select("id")
+        .eq("id", body.account_id)
+        .eq("user_id", req.userId!)
+        .maybeSingle();
+      if (!a) return reply.status(400).send({ error: "account_id no válido" });
+    }
+    if (body.post_id) {
+      const { data: p } = await sb.from("posts").select("account_id").eq("id", body.post_id).maybeSingle();
+      if (!p) return reply.status(400).send({ error: "post_id no válido" });
+      const { data: a } = await sb
+        .from("linkedin_accounts")
+        .select("id")
+        .eq("id", p.account_id)
+        .eq("user_id", req.userId!)
+        .maybeSingle();
+      if (!a) return reply.status(400).send({ error: "post_id no válido" });
+    }
+    const { data, error } = await sb
+      .from("keyword_rules")
+      .insert({
+        ...body,
+        user_id: req.userId!,
+        dm_followup_use_ai: body.dm_followup_use_ai ?? false,
+        is_active: body.is_active ?? true,
+      })
+      .select("*")
+      .single();
+    if (error) return reply.status(400).send({ error: error.message });
+    return { rule: data };
+  });
+
+  app.patch("/keyword-rules/:id", async (req, reply) => {
+    const id = (req.params as { id: string }).id;
+    const schema = z.object({
+      keyword: z.string().min(1).optional(),
+      reply_template: z.string().min(1).optional(),
+      rule_type: z.enum(["dm", "comment"]).optional(),
+      use_ai: z.boolean().optional(),
+      is_active: z.boolean().optional(),
+      account_id: z.string().uuid().nullable().optional(),
+      post_id: z.string().uuid().nullable().optional(),
+      dm_followup_template: z.string().nullable().optional(),
+      dm_followup_use_ai: z.boolean().optional(),
+    });
+    const body = schema.parse(req.body ?? {});
+    if (!Object.keys(body).length) return reply.status(400).send({ error: "Nada que actualizar" });
+    const { data: existing } = await sb.from("keyword_rules").select("id").eq("id", id).eq("user_id", req.userId!).maybeSingle();
+    if (!existing) return reply.status(404).send({ error: "Not found" });
+    if (body.account_id) {
+      const { data: a } = await sb
+        .from("linkedin_accounts")
+        .select("id")
+        .eq("id", body.account_id)
+        .eq("user_id", req.userId!)
+        .maybeSingle();
+      if (!a) return reply.status(400).send({ error: "account_id no válido" });
+    }
+    if (body.post_id) {
+      const { data: p } = await sb.from("posts").select("account_id").eq("id", body.post_id).maybeSingle();
+      if (!p) return reply.status(400).send({ error: "post_id no válido" });
+      const { data: a } = await sb
+        .from("linkedin_accounts")
+        .select("id")
+        .eq("id", p.account_id)
+        .eq("user_id", req.userId!)
+        .maybeSingle();
+      if (!a) return reply.status(400).send({ error: "post_id no válido" });
+    }
+    const { data, error } = await sb.from("keyword_rules").update(body).eq("id", id).select("*").single();
     if (error) return reply.status(400).send({ error: error.message });
     return { rule: data };
   });
@@ -553,14 +1532,35 @@ export async function registerApiRoutes(app: FastifyInstance) {
     const { data: accounts } = await sb.from("linkedin_accounts").select("id").eq("user_id", req.userId!);
     const ids = accounts?.map((a) => a.id) ?? [];
     if (!ids.length) return { tasks: [] };
-    const { data, error } = await sb
-      .from("tasks")
-      .select("*")
-      .in("account_id", ids)
-      .order("created_at", { ascending: false })
-      .limit(100);
+    const q = req.query as { status?: string; limit?: string };
+    const limit = Math.min(500, Math.max(1, Number(q.limit ?? 200)));
+    let qb = sb.from("tasks").select("*").in("account_id", ids).order("created_at", { ascending: false }).limit(limit);
+    if (q.status && q.status !== "all") qb = qb.eq("status", q.status);
+    const { data, error } = await qb;
     if (error) throw error;
     return { tasks: data ?? [] };
+  });
+
+  app.delete("/tasks/:id", async (req) => {
+    const { id } = req.params as { id: string };
+    const { data: accounts } = await sb.from("linkedin_accounts").select("id").eq("user_id", req.userId!);
+    const ids = accounts?.map((a) => a.id) ?? [];
+    if (!ids.length) return { ok: false };
+    const { data: task } = await sb.from("tasks").select("id, account_id, status").eq("id", id).maybeSingle();
+    if (!task || !ids.includes(task.account_id as string)) return { ok: false, error: "not_found" };
+    await sb.from("tasks").delete().eq("id", id);
+    return { ok: true };
+  });
+
+  app.delete("/tasks", async (req) => {
+    const schema = z.object({ status: z.enum(["pending", "running", "failed", "completed", "dead", "all"]) });
+    const body = schema.parse(req.body ?? {});
+    const { data: accounts } = await sb.from("linkedin_accounts").select("id").eq("user_id", req.userId!);
+    const ids = accounts?.map((a) => a.id) ?? [];
+    if (!ids.length) return { deleted: 0 };
+    const q = sb.from("tasks").delete({ count: "exact" }).in("account_id", ids);
+    const { count } = body.status === "all" ? await q : await q.eq("status", body.status);
+    return { deleted: count ?? 0 };
   });
 
   app.get("/messages", async (req) => {
@@ -575,6 +1575,17 @@ export async function registerApiRoutes(app: FastifyInstance) {
       .limit(100);
     if (error) throw error;
     return { messages: data ?? [] };
+  });
+
+  app.get("/inbound-comment-events", async (req) => {
+    const { data, error } = await sb
+      .from("inbound_comment_events")
+      .select("*")
+      .eq("user_id", req.userId!)
+      .order("created_at", { ascending: false })
+      .limit(100);
+    if (error) throw error;
+    return { events: data ?? [] };
   });
 
   app.get("/inbox", async (req) => {

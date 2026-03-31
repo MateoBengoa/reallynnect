@@ -14,6 +14,10 @@ type Account = {
   li_headline: string | null;
   li_photo_url: string | null;
   session_verified_at: string | null;
+  daily_message_budget: number | null;
+  daily_visit_budget: number | null;
+  daily_connect_budget: number | null;
+  rotation_priority: number;
 };
 
 function verificationLabel(a: Account): string {
@@ -50,12 +54,21 @@ export default function AccountsPage() {
   const [liAt, setLiAt] = useState("");
   const [msg, setMsg] = useState<string | null>(null);
   const [syncingId, setSyncingId] = useState<string | null>(null);
+  const [budgetDrafts, setBudgetDrafts] = useState<Record<string, string>>({});
   const syncBaseline = useRef<{ at: string | null; name: string | null } | null>(null);
 
   const load = useCallback(async () => {
     if (!(await getValidAccessToken())) return;
     const r = await api<{ accounts: Account[] }>("/linkedin-accounts");
     setAccounts(r.accounts);
+    const next: Record<string, string> = {};
+    for (const a of r.accounts) {
+      next[`${a.id}-msg`] = a.daily_message_budget != null ? String(a.daily_message_budget) : "";
+      next[`${a.id}-vis`] = a.daily_visit_budget != null ? String(a.daily_visit_budget) : "";
+      next[`${a.id}-con`] = a.daily_connect_budget != null ? String(a.daily_connect_budget) : "";
+      next[`${a.id}-rot`] = String(a.rotation_priority ?? 0);
+    }
+    setBudgetDrafts(next);
   }, []);
 
   useEffect(() => {
@@ -140,23 +153,51 @@ export default function AccountsPage() {
     await load();
   }
 
+  function numOrNull(s: string): number | null {
+    const t = s.trim();
+    if (!t) return null;
+    const n = parseInt(t, 10);
+    return Number.isFinite(n) && n > 0 ? n : null;
+  }
+
+  async function saveBudgets(accountId: string) {
+    setMsg(null);
+    if (!(await getValidAccessToken())) return;
+    try {
+      await api(`/linkedin-accounts/${accountId}`, {
+        method: "PATCH",
+        body: JSON.stringify({
+          daily_message_budget: numOrNull(budgetDrafts[`${accountId}-msg`] ?? ""),
+          daily_visit_budget: numOrNull(budgetDrafts[`${accountId}-vis`] ?? ""),
+          daily_connect_budget: numOrNull(budgetDrafts[`${accountId}-con`] ?? ""),
+          rotation_priority: Math.floor(Number(budgetDrafts[`${accountId}-rot`] ?? "0")) || 0,
+        }),
+      });
+      setMsg("Límites guardados. Vacío = límite por defecto del worker.");
+      await load();
+    } catch (e: unknown) {
+      setMsg(e instanceof Error ? e.message : "Error");
+    }
+  }
+
   return (
     <div>
-      <h1 className="mb-4 text-2xl font-semibold">Cuentas LinkedIn</h1>
-      <p className="mb-4 max-w-2xl text-sm text-[var(--muted)]">
+      <h1 className="page-title mb-4">Cuentas LinkedIn</h1>
+      <p className="page-desc mb-4">
         Inicia sesión en LinkedIn, abre DevTools → Application → Cookies → copia el valor de{" "}
-        <code className="text-[var(--text)]">li_at</code> y pégalo aquí. Se cifra antes de guardarse.
+        <code className="text-[var(--text)]">li_at</code> y pégalo aquí. Se cifra antes de guardarse. Los presupuestos diarios
+        (DM, visitas, invitaciones) y la prioridad de rotación aplican a campañas y límites Redis por cuenta.
       </p>
-      <form onSubmit={connect} className="mb-8 max-w-xl space-y-3 rounded-xl border border-white/10 bg-[var(--surface)] p-4">
+      <form onSubmit={connect} className="card card-pad mb-8 max-w-xl space-y-3">
         <textarea
-          className="min-h-[100px] w-full rounded border border-white/10 bg-[var(--bg)] px-2 py-1.5 font-mono text-xs"
+          className="input-field min-h-[100px] py-2 font-mono text-xs"
           placeholder="Pegar li_at…"
           value={liAt}
           onChange={(e) => setLiAt(e.target.value)}
           required
         />
         {msg && <p className="text-sm text-[var(--muted)]">{msg}</p>}
-        <button type="submit" className="rounded-lg bg-[var(--accent)] px-4 py-2 font-medium text-white">
+        <button type="submit" className="btn-primary">
           Guardar y verificar sesión
         </button>
       </form>
@@ -164,7 +205,7 @@ export default function AccountsPage() {
         {accounts.map((a) => (
           <li
             key={a.id}
-            className="flex flex-col gap-3 rounded-xl border border-white/10 bg-[var(--surface)] p-4 sm:flex-row sm:items-start sm:justify-between"
+            className="card card-pad flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between"
           >
             <div className="flex min-w-0 flex-1 gap-3">
               {a.li_photo_url ? (
@@ -172,11 +213,11 @@ export default function AccountsPage() {
                 <img
                   src={a.li_photo_url}
                   alt=""
-                  className="h-14 w-14 shrink-0 rounded-full object-cover ring-1 ring-white/10"
+                  className="h-14 w-14 shrink-0 rounded-full object-cover ring-1 ring-[var(--border)]"
                   referrerPolicy="no-referrer"
                 />
               ) : (
-                <div className="flex h-14 w-14 shrink-0 items-center justify-center rounded-full bg-white/5 text-lg text-[var(--muted)]">
+                <div className="flex h-14 w-14 shrink-0 items-center justify-center rounded-full bg-[color-mix(in_srgb,var(--text)_6%,var(--surface))] text-lg text-[var(--muted)]">
                   in
                 </div>
               )}
@@ -188,23 +229,71 @@ export default function AccountsPage() {
                   <p className="mt-0.5 line-clamp-2 text-sm text-[var(--muted)]">{a.li_headline}</p>
                 )}
                 <p className="mt-2 text-xs text-[var(--muted)]">{verificationLabel(a)}</p>
-                <p className="mt-1 font-mono text-[10px] text-white/30">{a.id}</p>
+                <p className="mt-1 font-mono text-[10px] text-[color-mix(in_srgb,var(--text)_35%,var(--muted))]">{a.id}</p>
               </div>
+            </div>
+            <div className="flex min-w-0 flex-1 flex-col gap-3 sm:max-w-md">
+              <p className="text-[10px] font-semibold uppercase tracking-wide text-[var(--muted)]">Límites diarios (opcional)</p>
+              <div className="grid grid-cols-2 gap-2 text-xs sm:grid-cols-4">
+                <label className="flex flex-col gap-0.5">
+                  <span className="text-[var(--muted)]">DM</span>
+                  <input
+                    className="input-field min-h-9 py-1.5 text-xs"
+                    inputMode="numeric"
+                    value={budgetDrafts[`${a.id}-msg`] ?? ""}
+                    onChange={(e) => setBudgetDrafts((d) => ({ ...d, [`${a.id}-msg`]: e.target.value }))}
+                    placeholder="auto"
+                  />
+                </label>
+                <label className="flex flex-col gap-0.5">
+                  <span className="text-[var(--muted)]">Visitas</span>
+                  <input
+                    className="input-field min-h-9 py-1.5 text-xs"
+                    inputMode="numeric"
+                    value={budgetDrafts[`${a.id}-vis`] ?? ""}
+                    onChange={(e) => setBudgetDrafts((d) => ({ ...d, [`${a.id}-vis`]: e.target.value }))}
+                    placeholder="auto"
+                  />
+                </label>
+                <label className="flex flex-col gap-0.5">
+                  <span className="text-[var(--muted)]">Conexiones</span>
+                  <input
+                    className="input-field min-h-9 py-1.5 text-xs"
+                    inputMode="numeric"
+                    value={budgetDrafts[`${a.id}-con`] ?? ""}
+                    onChange={(e) => setBudgetDrafts((d) => ({ ...d, [`${a.id}-con`]: e.target.value }))}
+                    placeholder="auto"
+                  />
+                </label>
+                <label className="flex flex-col gap-0.5">
+                  <span className="text-[var(--muted)]">Prioridad</span>
+                  <input
+                    className="input-field min-h-9 py-1.5 text-xs"
+                    inputMode="numeric"
+                    value={budgetDrafts[`${a.id}-rot`] ?? "0"}
+                    onChange={(e) => setBudgetDrafts((d) => ({ ...d, [`${a.id}-rot`]: e.target.value }))}
+                    title="Menor = primera cuenta elegida en campañas activas"
+                  />
+                </label>
+              </div>
+              <button type="button" className="btn-secondary min-h-9 self-start px-3 py-1 text-xs" onClick={() => saveBudgets(a.id)}>
+                Guardar límites
+              </button>
             </div>
             <div className="flex shrink-0 flex-wrap items-center justify-end gap-2 sm:flex-col">
               <button
                 type="button"
                 disabled={a.connection_status === "pending" || syncingId === a.id}
-                className="rounded-lg border border-white/15 bg-white/5 px-3 py-1.5 text-sm text-[var(--text)] hover:bg-white/10 disabled:opacity-40"
+                className="btn-secondary disabled:opacity-40"
                 onClick={() => syncProfile(a.id)}
               >
                 {syncingId === a.id ? "Sincronizando…" : "Sincronizar perfil"}
               </button>
-              <span className="rounded-md bg-white/5 px-2 py-0.5 text-xs text-[var(--muted)]">
+              <span className="rounded-[var(--radius-sm)] bg-[color-mix(in_srgb,var(--text)_6%,var(--surface))] px-2 py-0.5 text-xs text-[var(--muted)]">
                 {a.connection_status}
                 {a.connection_status === "pending" ? " · …" : ""} · {a.softban_status}
               </span>
-              <button type="button" className="text-sm text-red-400 hover:underline" onClick={() => remove(a.id)}>
+              <button type="button" className="btn-danger w-full sm:w-auto" onClick={() => remove(a.id)}>
                 Eliminar
               </button>
             </div>

@@ -196,7 +196,7 @@ Abre **cuatro terminales** desde la raíz del repo:
    npm run dev
    ```
 
-Entra en `http://localhost:3000`, regístrate o inicia sesión.
+Entra en `http://localhost:3030`, regístrate o inicia sesión.
 
 ---
 

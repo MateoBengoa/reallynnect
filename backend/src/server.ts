@@ -22,7 +22,11 @@ declare module "fastify" {
 
 async function buildServer() {
   const app = Fastify({ logger: true });
-  await app.register(cors, { origin: true });
+  await app.register(cors, {
+    origin: true,
+    allowedHeaders: ["Authorization", "Content-Type", "Accept"],
+    methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+  });
   await app.register(multipart, { limits: { fileSize: 8 * 1024 * 1024 } });
 
   const sb = getSupabaseAdmin();
@@ -41,6 +45,8 @@ async function buildServer() {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       api.decorate("redis", redis as any);
       api.addHook("preHandler", async (request, reply) => {
+        // CORS preflight: sin Authorization; @fastify/cors responde pero este hook corría antes y devolvía 401 sin cabeceras CORS.
+        if (request.method === "OPTIONS") return;
         const auth = request.headers.authorization;
         if (!auth?.startsWith("Bearer ")) {
           return reply.status(401).send({ error: "Unauthorized" });

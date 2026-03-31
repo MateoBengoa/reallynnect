@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { getValidAccessToken } from "@/lib/supabase";
 import { api } from "@/lib/api";
 
@@ -8,94 +8,284 @@ type Task = {
   id: string;
   action: string;
   status: string;
+  account_id: string | null;
+  lead_id: string | null;
+  enrollment_id: string | null;
   scheduled_at: string;
-  error_message: string | null;
+  created_at: string;
   attempts: number;
+  error_message: string | null;
+  payload: Record<string, unknown> | null;
 };
 
-type Diagnostics = Record<string, unknown>;
+const STATUS_STYLES: Record<string, string> = {
+  pending:   "bg-amber-400/15 text-amber-400 border-amber-400/30",
+  running:   "bg-blue-400/15 text-blue-400 border-blue-400/30",
+  completed: "bg-emerald-400/15 text-emerald-400 border-emerald-400/30",
+  failed:    "bg-red-400/15 text-red-400 border-red-400/30",
+};
+
+function StatusBadge({ status }: { status: string }) {
+  const cls = STATUS_STYLES[status] ?? "bg-[var(--border)] text-[var(--muted)]";
+  return (
+    <span className={`inline-flex items-center rounded border px-1.5 py-0.5 font-mono text-[10px] font-semibold ${cls}`}>
+      {status}
+    </span>
+  );
+}
+
+function short(id: string | null): string {
+  if (!id) return "—";
+  return id.slice(0, 8) + "…";
+}
+
+function relativeTime(iso: string): string {
+  const diff = Date.now() - new Date(iso).getTime();
+  const s = Math.floor(diff / 1000);
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h`;
+  return `${Math.floor(h / 24)}d`;
+}
+
+const FILTERS = ["all", "pending", "running", "failed", "completed"] as const;
+type Filter = (typeof FILTERS)[number];
 
 export default function TasksPage() {
   const [tasks, setTasks] = useState<Task[]>([]);
-  const [diag, setDiag] = useState<Diagnostics | null>(null);
-  const [diagLoading, setDiagLoading] = useState(false);
-  const [diagErr, setDiagErr] = useState<string | null>(null);
+  const [filter, setFilter] = useState<Filter>("all");
+  const [autoRefresh, setAutoRefresh] = useState(true);
+  const [expanded, setExpanded] = useState<string | null>(null);
+  const [deleting, setDeleting] = useState<string | null>(null);
+  const [bulkStatus, setBulkStatus] = useState<string | null>(null);
+  const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const load = useCallback(async () => {
     if (!(await getValidAccessToken())) return;
-    const r = await api<{ tasks: Task[] }>("/tasks");
-    setTasks(r.tasks);
-  }, []);
+    const qs = filter !== "all" ? `?status=${filter}` : "";
+    const r = await api<{ tasks: Task[] }>(`/tasks${qs}`);
+    setTasks(r.tasks ?? []);
+  }, [filter]);
 
   useEffect(() => {
-    load();
-    const t = setInterval(load, 15_000);
-    return () => clearInterval(t);
+    void load();
   }, [load]);
 
-  const runDiagnostics = useCallback(async () => {
-    setDiagLoading(true);
-    setDiagErr(null);
+  useEffect(() => {
+    if (intervalRef.current) clearInterval(intervalRef.current);
+    if (autoRefresh) {
+      intervalRef.current = setInterval(() => void load(), 4000);
+    }
+    return () => {
+      if (intervalRef.current) clearInterval(intervalRef.current);
+    };
+  }, [autoRefresh, load]);
+
+  const deleteOne = useCallback(async (id: string) => {
+    setDeleting(id);
     try {
-      if (!(await getValidAccessToken())) {
-        setDiagErr("Sin sesión");
-        return;
-      }
-      const r = await api<Diagnostics>("/debug/diagnostics");
-      setDiag(r);
-    } catch (e) {
-      setDiagErr(e instanceof Error ? e.message : String(e));
+      await api(`/tasks/${id}`, { method: "DELETE" });
+      setTasks((prev) => prev.filter((t) => t.id !== id));
     } finally {
-      setDiagLoading(false);
+      setDeleting(null);
     }
   }, []);
 
+  const deleteByStatus = useCallback(async (status: string) => {
+    setBulkStatus(status);
+    try {
+      const r = await api<{ deleted: number }>("/tasks", {
+        method: "DELETE",
+        body: JSON.stringify({ status }),
+      });
+      setBulkStatus(null);
+      await load();
+      return r.deleted;
+    } catch {
+      setBulkStatus(null);
+    }
+  }, [load]);
+
+  const counts = tasks.reduce<Record<string, number>>((acc, t) => {
+    acc[t.status] = (acc[t.status] ?? 0) + 1;
+    return acc;
+  }, {});
+
   return (
-    <div>
-      <h1 className="mb-4 text-2xl font-semibold">Cola de tareas</h1>
-      <div className="mb-4 flex flex-wrap items-center gap-2">
+    <div className="space-y-4">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <h1 className="page-title">Cola de tareas</h1>
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => void load()}
+            className="btn-secondary py-1.5 text-xs"
+          >
+            ↺ Refrescar
+          </button>
+          <label className="flex cursor-pointer items-center gap-1.5 text-xs text-[var(--muted)]">
+            <input
+              type="checkbox"
+              checked={autoRefresh}
+              onChange={(e) => setAutoRefresh(e.target.checked)}
+              className="h-3.5 w-3.5 rounded border-[var(--border)] accent-[var(--accent)]"
+            />
+            Auto (4s)
+          </label>
+        </div>
+      </div>
+
+      {/* Counters */}
+      <div className="flex flex-wrap gap-2">
+        {(["pending", "running", "failed", "completed"] as const).map((s) => (
+          <button
+            key={s}
+            type="button"
+            onClick={() => setFilter(s)}
+            className={`rounded-[var(--radius-md)] border px-2.5 py-1 text-xs font-medium transition-colors ${
+              filter === s
+                ? STATUS_STYLES[s] ?? "bg-[var(--border)]"
+                : "border-[var(--border)] text-[var(--muted)] hover:border-[var(--text)]/20"
+            }`}
+          >
+            {s} {counts[s] ? <span className="font-bold">({counts[s]})</span> : "(0)"}
+          </button>
+        ))}
         <button
           type="button"
-          onClick={runDiagnostics}
-          disabled={diagLoading}
-          className="rounded border border-white/20 px-3 py-1.5 text-sm hover:bg-white/5 disabled:opacity-50"
+          onClick={() => setFilter("all")}
+          className={`rounded-[var(--radius-md)] border px-2.5 py-1 text-xs font-medium transition-colors ${
+            filter === "all"
+              ? "border-[var(--accent)] bg-[var(--accent)]/10 text-[var(--accent)]"
+              : "border-[var(--border)] text-[var(--muted)] hover:border-[var(--text)]/20"
+          }`}
         >
-          {diagLoading ? "Analizando…" : "Diagnóstico del stack"}
+          todas ({tasks.length})
         </button>
-        {diagErr && <span className="text-sm text-red-400">{diagErr}</span>}
       </div>
-      {diag && (
-        <div className="mb-6 rounded border border-amber-500/30 bg-amber-500/5 p-3">
-          <p className="mb-2 text-sm font-medium text-amber-200/90">Resultado (API + Supabase)</p>
-          {Array.isArray(diag.warnings) && (diag.warnings as string[]).length > 0 && (
-            <ul className="mb-3 list-inside list-disc text-sm text-amber-100/90">
-              {(diag.warnings as string[]).map((w) => (
-                <li key={w}>{w}</li>
-              ))}
-            </ul>
-          )}
-          <pre className="max-h-80 overflow-auto rounded bg-black/40 p-2 font-mono text-[10px] leading-relaxed text-[var(--muted)]">
-            {JSON.stringify(diag, null, 2)}
-          </pre>
-        </div>
-      )}
-      <p className="mb-4 max-w-2xl text-sm text-[var(--muted)]">
-        Estado en Supabase. Si una tarea se queda en «running» tras cerrar el worker, el propio worker la vuelve a
-        «pending» pasados unos minutos (migración <code className="text-[var(--text)]">003_tasks_locked_at</code> +
-        variable <code className="text-[var(--text)]">TASK_STALE_RUNNING_MINUTES</code> en el backend).
-      </p>
-      <ul className="space-y-2 font-mono text-xs">
-        {tasks.map((t) => (
-          <li key={t.id} className="rounded border border-white/10 px-2 py-2">
-            <div className="flex flex-wrap justify-between gap-2">
-              <span>{t.action}</span>
-              <span className="text-[var(--muted)]">{t.status}</span>
-            </div>
-            <div className="text-[var(--muted)]">{t.scheduled_at}</div>
-            {t.error_message && <div className="text-red-400">{t.error_message}</div>}
-          </li>
-        ))}
-      </ul>
+
+      {/* Bulk actions */}
+      <div className="flex flex-wrap gap-2">
+        <button
+          type="button"
+          disabled={bulkStatus === "failed"}
+          onClick={() => void deleteByStatus("failed")}
+          className="rounded-[var(--radius-md)] border border-red-500/30 bg-red-500/5 px-2.5 py-1 text-xs font-medium text-red-400 transition-colors hover:bg-red-500/10 disabled:opacity-50"
+        >
+          {bulkStatus === "failed" ? "Eliminando…" : "Borrar todas las fallidas"}
+        </button>
+        <button
+          type="button"
+          disabled={bulkStatus === "completed"}
+          onClick={() => void deleteByStatus("completed")}
+          className="rounded-[var(--radius-md)] border border-[var(--border)] px-2.5 py-1 text-xs font-medium text-[var(--muted)] transition-colors hover:border-[var(--text)]/20 disabled:opacity-50"
+        >
+          {bulkStatus === "completed" ? "Eliminando…" : "Borrar completadas"}
+        </button>
+        <button
+          type="button"
+          disabled={bulkStatus === "all"}
+          onClick={() => {
+            if (!confirm("¿Borrar TODAS las tareas (pending, running, failed, completed)? Esta acción no se puede deshacer.")) return;
+            void deleteByStatus("all");
+          }}
+          className="rounded-[var(--radius-md)] border border-red-600/40 bg-red-600/10 px-2.5 py-1 text-xs font-medium text-red-500 transition-colors hover:bg-red-600/20 disabled:opacity-50"
+        >
+          {bulkStatus === "all" ? "Eliminando…" : "⚠ Borrar TODAS"}
+        </button>
+      </div>
+
+      {/* Table */}
+      <div className="overflow-x-auto rounded-[var(--radius-lg)] border border-[var(--border)]">
+        <table className="w-full text-xs">
+          <thead>
+            <tr className="border-b border-[var(--border)] bg-[color-mix(in_srgb,var(--text)_4%,var(--surface))]">
+              <th className="px-3 py-2 text-left font-semibold text-[var(--muted)]">Acción</th>
+              <th className="px-3 py-2 text-left font-semibold text-[var(--muted)]">Estado</th>
+              <th className="px-3 py-2 text-left font-semibold text-[var(--muted)]">Cuenta</th>
+              <th className="px-3 py-2 text-left font-semibold text-[var(--muted)]">Lead</th>
+              <th className="px-3 py-2 text-left font-semibold text-[var(--muted)]">Prog.</th>
+              <th className="px-3 py-2 text-left font-semibold text-[var(--muted)]">Creada</th>
+              <th className="px-3 py-2 text-left font-semibold text-[var(--muted)]">Int.</th>
+              <th className="px-3 py-2 text-left font-semibold text-[var(--muted)]"></th>
+            </tr>
+          </thead>
+          <tbody>
+            {tasks.length === 0 && (
+              <tr>
+                <td colSpan={8} className="px-3 py-8 text-center text-[var(--muted)]">
+                  Sin tareas
+                </td>
+              </tr>
+            )}
+            {tasks.map((t) => (
+              <>
+                <tr
+                  key={t.id}
+                  className="border-b border-[var(--border)]/50 bg-[var(--surface)] transition-colors hover:bg-[color-mix(in_srgb,var(--text)_3%,var(--surface))]"
+                >
+                  <td className="px-3 py-2 font-mono font-semibold text-[var(--text)]">{t.action}</td>
+                  <td className="px-3 py-2">
+                    <StatusBadge status={t.status} />
+                  </td>
+                  <td className="px-3 py-2 font-mono text-[var(--muted)]">{short(t.account_id)}</td>
+                  <td className="px-3 py-2 font-mono text-[var(--muted)]">{short(t.lead_id)}</td>
+                  <td className="px-3 py-2 font-mono text-[var(--muted)]" title={t.scheduled_at}>
+                    {relativeTime(t.scheduled_at)}
+                  </td>
+                  <td className="px-3 py-2 font-mono text-[var(--muted)]" title={t.created_at}>
+                    {relativeTime(t.created_at)}
+                  </td>
+                  <td className="px-3 py-2 text-center text-[var(--muted)]">{t.attempts}</td>
+                  <td className="px-3 py-2">
+                    <div className="flex items-center gap-1">
+                      <button
+                        type="button"
+                        onClick={() => setExpanded((prev) => (prev === t.id ? null : t.id))}
+                        className="rounded px-1.5 py-0.5 text-[10px] text-[var(--muted)] hover:bg-[color-mix(in_srgb,var(--text)_8%,transparent)] hover:text-[var(--text)]"
+                      >
+                        {expanded === t.id ? "▲" : "▼"}
+                      </button>
+                      <button
+                        type="button"
+                        disabled={deleting === t.id}
+                        onClick={() => void deleteOne(t.id)}
+                        className="rounded px-1.5 py-0.5 text-[10px] text-red-400/70 hover:bg-red-500/10 hover:text-red-400 disabled:opacity-40"
+                      >
+                        ✕
+                      </button>
+                    </div>
+                  </td>
+                </tr>
+                {expanded === t.id && (
+                  <tr key={`${t.id}-exp`} className="border-b border-[var(--border)]/50 bg-[color-mix(in_srgb,var(--text)_2%,var(--surface))]">
+                    <td colSpan={8} className="px-3 py-2">
+                      {t.error_message && (
+                        <p className="mb-1.5 rounded bg-red-500/10 px-2 py-1 text-[10px] font-mono text-red-400">
+                          Error: {t.error_message}
+                        </p>
+                      )}
+                      <div className="grid gap-1 font-mono text-[10px] text-[var(--muted)] sm:grid-cols-2">
+                        <span>ID: {t.id}</span>
+                        {t.enrollment_id && <span>Enrollment: {t.enrollment_id}</span>}
+                        <span>Scheduled: {new Date(t.scheduled_at).toLocaleString()}</span>
+                        <span>Created: {new Date(t.created_at).toLocaleString()}</span>
+                      </div>
+                      {t.payload && Object.keys(t.payload).length > 0 && (
+                        <pre className="mt-1.5 max-h-40 overflow-auto rounded bg-black/30 p-2 text-[10px] leading-relaxed text-[var(--muted)]">
+                          {JSON.stringify(t.payload, null, 2)}
+                        </pre>
+                      )}
+                    </td>
+                  </tr>
+                )}
+              </>
+            ))}
+          </tbody>
+        </table>
+      </div>
     </div>
   );
 }

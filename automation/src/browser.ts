@@ -74,12 +74,14 @@ export async function createContext(
 }
 
 export async function injectLiAt(page: Page, cookieValue: string): Promise<void> {
+  const value = cookieValue.trim();
+  if (!value) throw new Error("li_at vacío");
   await page.goto("https://www.linkedin.com/", { waitUntil: "domcontentloaded", timeout: 60000 });
   const context = page.context();
   await context.addCookies([
     {
       name: "li_at",
-      value: cookieValue,
+      value,
       domain: ".linkedin.com",
       path: "/",
       secure: true,

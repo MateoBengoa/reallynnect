@@ -49,21 +49,21 @@ export default function DashboardHome() {
 
   return (
     <div>
-      <h1 className="mb-6 text-2xl font-semibold">Resumen</h1>
+      <h1 className="page-title mb-6">Resumen</h1>
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5">
         {cards.map((c) => (
-          <div key={c.label} className="rounded-xl border border-white/10 bg-[var(--surface)] p-4">
+          <div key={c.label} className="kpi-card">
             <p className="text-sm text-[var(--muted)]">{c.label}</p>
-            <p className="text-3xl font-semibold">{c.n}</p>
+            <p className="mt-1 text-3xl font-semibold tracking-tight text-[var(--text)]">{c.n}</p>
           </div>
         ))}
       </div>
-      <p className="mt-8 max-w-xl text-sm text-[var(--muted)]">
+      <p className="page-desc mt-8">
         Añade proxies residenciales, conecta la cookie <code className="text-[var(--text)]">li_at</code>, importa leads y define
         campañas como flujo en el lienzo. El worker ejecuta la cola con Playwright.
       </p>
       <p className="mt-4 text-sm">
-        <Link href="/dashboard/roadmap" className="text-[var(--accent)] underline-offset-2 hover:underline">
+        <Link href="/dashboard/roadmap" className="link-focus rounded-sm text-[var(--accent)] underline-offset-2 hover:underline">
           Ver roadmap de próximas olas (inbound, contenido, escala)
         </Link>
       </p>

@@ -55,10 +55,10 @@ export default function ProxiesPage() {
 
   return (
     <div>
-      <h1 className="mb-4 text-2xl font-semibold">Proxies (Webshare)</h1>
-      <form onSubmit={add} className="mb-8 grid max-w-lg gap-3 rounded-xl border border-white/10 bg-[var(--surface)] p-4 sm:grid-cols-2">
+      <h1 className="page-title mb-4">Proxies (Webshare)</h1>
+      <form onSubmit={add} className="card card-pad mb-8 grid max-w-lg gap-3 sm:grid-cols-2">
         <input
-          className="rounded border border-white/10 bg-[var(--bg)] px-2 py-1.5 sm:col-span-2"
+          className="input-field sm:col-span-2"
           placeholder="Host"
           value={host}
           onChange={(e) => setHost(e.target.value)}
@@ -66,32 +66,32 @@ export default function ProxiesPage() {
         />
         <input
           type="number"
-          className="rounded border border-white/10 bg-[var(--bg)] px-2 py-1.5"
+          className="input-field"
           placeholder="Puerto"
           value={port}
           onChange={(e) => setPort(Number(e.target.value))}
         />
         <input
-          className="rounded border border-white/10 bg-[var(--bg)] px-2 py-1.5"
+          className="input-field"
           placeholder="Usuario (opcional)"
           value={username}
           onChange={(e) => setUsername(e.target.value)}
         />
         <input
           type="password"
-          className="rounded border border-white/10 bg-[var(--bg)] px-2 py-1.5 sm:col-span-2"
+          className="input-field sm:col-span-2"
           placeholder="Contraseña proxy"
           value={password}
           onChange={(e) => setPassword(e.target.value)}
         />
         {err && <p className="text-sm text-red-400 sm:col-span-2">{err}</p>}
-        <button type="submit" className="rounded-lg bg-[var(--accent)] py-2 font-medium text-white sm:col-span-2">
+        <button type="submit" className="btn-primary sm:col-span-2">
           Añadir proxy
         </button>
       </form>
       <ul className="space-y-2">
         {list.map((p) => (
-          <li key={p.id} className="flex justify-between rounded-lg border border-white/10 px-3 py-2 text-sm">
+          <li key={p.id} className="card card-pad flex justify-between py-2 text-sm shadow-none">
             <span>
               {p.host}:{p.port} {p.username ? `(${p.username})` : ""}
             </span>
