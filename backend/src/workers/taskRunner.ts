@@ -1320,6 +1320,253 @@ async function clickConvRow(page: Page, rowSelector: string, rowIndex: number): 
   return true;
 }
 
+// ─── Voyager API inbox sync ────────────────────────────────────────────────
+
+/** Construye URL de foto desde VectorImage de LinkedIn Voyager. */
+function buildVoyagerPhotoUrl(pic: unknown): string | null {
+  if (!pic || typeof pic !== "object") return null;
+  const p = pic as Record<string, unknown>;
+  const vi =
+    (p["com.linkedin.common.VectorImage"] as Record<string, unknown> | undefined) ??
+    (typeof p.rootUrl === "string" ? p : null);
+  if (!vi) return null;
+  const root = typeof vi.rootUrl === "string" ? vi.rootUrl : null;
+  const arts = vi.artifacts as Array<Record<string, unknown>> | undefined;
+  if (!root || !Array.isArray(arts) || !arts.length) return null;
+  const best = [...arts].sort((a, b) => (Number(b.width) || 0) - (Number(a.width) || 0))[0];
+  const seg = best?.fileIdentifyingUrlPathSegment;
+  if (typeof seg !== "string" || !seg) return null;
+  return root.endsWith("/") ? `${root}${seg}` : `${root}/${seg}`;
+}
+
+/** Extrae conversationId (segmento de /messaging/thread/<id>/) desde un URN de Voyager. */
+function voyagerUrnToThreadId(urn: string): string | null {
+  if (!urn) return null;
+  // Formato tuple: urn:li:msg_conversation:(urn:li:fsd_profile:...,2-abc=) → "2-abc="
+  const tupleM = urn.match(/,([^,)]+)\)$/);
+  if (tupleM?.[1]) {
+    try { return decodeURIComponent(tupleM[1]); } catch { return tupleM[1]; }
+  }
+  // Formato directo: urn:li:thread:2-abc= → "2-abc="
+  const simpleM = urn.match(/urn:li:(?:thread|msg_thread):(.+)$/);
+  if (simpleM?.[1]) return simpleM[1];
+  return null;
+}
+
+/** Parsea MiniProfile de LinkedIn Voyager. */
+function parseMiniProfileVoyager(mp: unknown): { name: string | null; photoUrl: string | null } {
+  if (!mp || typeof mp !== "object") return { name: null, photoUrl: null };
+  const o = mp as Record<string, unknown>;
+  const fn = typeof o.firstName === "string" ? o.firstName.trim() : "";
+  const ln = typeof o.lastName === "string" ? o.lastName.trim() : "";
+  const name = [fn, ln].filter(Boolean).join(" ") || null;
+  const photoUrl = buildVoyagerPhotoUrl(o.picture) ?? buildVoyagerPhotoUrl(o.profilePicture);
+  return { name, photoUrl };
+}
+
+/**
+ * Parsea respuesta de /voyager/api/messaging/conversations.
+ * Maneja formato normalized (included) e inline (elements).
+ */
+function parseVoyagerConversationList(body: unknown, maxRows: number): InboxListRow[] {
+  if (!body || typeof body !== "object") return [];
+  const b = body as Record<string, unknown>;
+
+  const candidates: unknown[] = [];
+  // Formato 1: included con $type que contiene "Conversation"
+  if (Array.isArray(b.included)) {
+    for (const item of b.included) {
+      if (!item || typeof item !== "object") continue;
+      const o = item as Record<string, unknown>;
+      if (String(o.$type ?? "").toLowerCase().includes("conversation") && typeof o.entityUrn === "string") {
+        candidates.push(item);
+      }
+    }
+  }
+  // Formato 2: b.elements directos
+  if (!candidates.length && Array.isArray(b.elements)) {
+    for (const item of b.elements) { if (item && typeof item === "object") candidates.push(item); }
+  }
+  // Formato 3: b.data.elements
+  if (!candidates.length) {
+    const data = b.data as Record<string, unknown> | undefined;
+    if (data && Array.isArray(data.elements)) {
+      for (const item of data.elements) { if (item && typeof item === "object") candidates.push(item); }
+    }
+  }
+
+  // Índice de included por URN para resolver referencias
+  const includedByUrn = new Map<string, Record<string, unknown>>();
+  if (Array.isArray(b.included)) {
+    for (const item of b.included) {
+      if (!item || typeof item !== "object") continue;
+      const o = item as Record<string, unknown>;
+      if (typeof o.entityUrn === "string") includedByUrn.set(o.entityUrn, o);
+      if (typeof o.$id === "string") includedByUrn.set(o.$id, o);
+    }
+  }
+
+  const rows: InboxListRow[] = [];
+  for (const conv of candidates) {
+    if (rows.length >= maxRows) break;
+    const c = conv as Record<string, unknown>;
+
+    // conversationId desde conversationId directo o URN
+    const rawUrn = String(c.entityUrn ?? "");
+    let conversationId = typeof c.conversationId === "string" ? c.conversationId : voyagerUrnToThreadId(rawUrn);
+    if (!conversationId && rawUrn) {
+      const m = rawUrn.match(/(2-[A-Za-z0-9+/=_-]+)/);
+      if (m?.[1]) conversationId = m[1];
+    }
+    if (!conversationId) continue;
+
+    // Timestamp real
+    const lastActivityAt = Number(c.lastActivityAt ?? c.lastSeenAt ?? 0);
+    const lastActivityAtIso = lastActivityAt > 0 ? new Date(lastActivityAt).toISOString() : null;
+
+    // Participantes → nombre y foto del peer
+    let peerName: string | null = null;
+    let peerPhotoUrl: string | null = null;
+    const participantsRaw = c.participants;
+    const participantsList: unknown[] = Array.isArray(participantsRaw)
+      ? participantsRaw
+      : Array.isArray((participantsRaw as Record<string, unknown> | undefined)?.elements)
+        ? ((participantsRaw as Record<string, unknown>).elements as unknown[])
+        : [];
+    for (const p of participantsList) {
+      if (!p || typeof p !== "object") continue;
+      const pm = p as Record<string, unknown>;
+      let mp: unknown = pm.miniProfile;
+      if (!mp && typeof pm.entityUrn === "string") {
+        const res = includedByUrn.get(pm.entityUrn);
+        if (res) mp = res.miniProfile ?? res;
+      }
+      if (!mp && typeof pm.firstName === "string") mp = pm;
+      const parsed = parseMiniProfileVoyager(mp);
+      if (parsed.name) peerName = parsed.name;
+      if (parsed.photoUrl) peerPhotoUrl = parsed.photoUrl;
+      if (peerName) break;
+    }
+
+    // Preview del último evento/mensaje
+    let preview = "—";
+    const eventsRaw = c.events ?? c.messages;
+    const eventsList: unknown[] = Array.isArray(eventsRaw)
+      ? eventsRaw
+      : Array.isArray((eventsRaw as Record<string, unknown> | undefined)?.elements)
+        ? ((eventsRaw as Record<string, unknown>).elements as unknown[])
+        : [];
+    const lastEvent = eventsList.length ? eventsList[eventsList.length - 1] : null;
+    if (lastEvent && typeof lastEvent === "object") {
+      const ev = lastEvent as Record<string, unknown>;
+      const content = ev.eventContent ?? ev.messageBody;
+      if (content && typeof content === "object") {
+        const bd = (content as Record<string, unknown>).attributedBody ?? (content as Record<string, unknown>).body;
+        if (bd && typeof bd === "object") {
+          const text = String((bd as Record<string, unknown>).text ?? "").trim();
+          if (text) preview = text.slice(0, 300);
+        }
+      }
+      if (preview === "—" && typeof ev.body === "string") preview = ev.body.slice(0, 300);
+    }
+
+    rows.push({ conversationId, peerName, preview, peerPhotoUrl, lastActivityAtIso });
+  }
+  return rows;
+}
+
+/** Fetch de una página de conversaciones via Voyager API (ejecutado dentro del browser context). */
+async function fetchVoyagerConversationPage(
+  page: Page,
+  start: number,
+  count: number,
+  timeoutMs: number,
+): Promise<unknown | null> {
+  return page.evaluate(
+    async ([s, c, ms]: [number, number, number]) => {
+      const ac = new AbortController();
+      const timer = setTimeout(() => ac.abort(), ms);
+      try {
+        const jsM = document.cookie.match(/JSESSIONID=(?:"([^"]+)"|([^;\s]+))/);
+        const csrf = ((jsM?.[1] ?? jsM?.[2]) || "").replace(/^"/, "").replace(/"$/, "");
+        const url = `/voyager/api/messaging/conversations?keyVersion=LEGACY_INBOX&start=${s}&count=${c}`;
+        const r = await fetch(url, {
+          credentials: "include",
+          signal: ac.signal,
+          headers: {
+            accept: "application/vnd.linkedin.normalized+json+2.1",
+            "csrf-token": csrf,
+            "x-restli-protocol-version": "2.0.0",
+            "x-li-lang": "en_US",
+          },
+        });
+        if (!r.ok) return { _status: r.status };
+        return await r.json();
+      } catch (e) {
+        return { _error: String(e) };
+      } finally {
+        clearTimeout(timer);
+      }
+    },
+    [start, count, timeoutMs] as [number, number, number]
+  );
+}
+
+/**
+ * Sincroniza inbox completo via Voyager API interna de LinkedIn.
+ * Sin navegaciones, sin clics. Retorna null si la API no está disponible.
+ */
+async function runMessagingInboxSyncVoyager(
+  page: Page,
+  maxThreads: number,
+  timeoutMs: number,
+): Promise<InboxListRow[] | null> {
+  const pageSize = 100;
+  const maxPages = Math.ceil(maxThreads / pageSize);
+  const allRows: InboxListRow[] = [];
+  const seen = new Set<string>();
+
+  for (let pg = 0; pg < maxPages; pg++) {
+    const start = pg * pageSize;
+    const count = Math.min(pageSize, maxThreads - allRows.length);
+    const body = await fetchVoyagerConversationPage(page, start, count, Math.min(timeoutMs, 15_000));
+
+    if (!body || typeof body !== "object") {
+      if (pg === 0) return null;
+      break;
+    }
+    const b = body as Record<string, unknown>;
+    if (b._error || (typeof b._status === "number" && (b._status as number) >= 400)) {
+      console.log(`[inbox_voyager] API no disponible: ${b._error ?? b._status}`);
+      if (pg === 0) return null;
+      break;
+    }
+
+    const rows = parseVoyagerConversationList(body, maxThreads - allRows.length);
+    if (pg === 0 && rows.length === 0) {
+      console.log("[inbox_voyager] página 0 sin resultados — sin acceso o inbox vacío");
+      return null;
+    }
+
+    let added = 0;
+    for (const r of rows) {
+      if (!seen.has(r.conversationId)) {
+        seen.add(r.conversationId);
+        allRows.push(r);
+        added++;
+      }
+    }
+    console.log(`[inbox_voyager] página ${pg + 1}/${maxPages}: +${added} conversaciones (total=${allRows.length})`);
+
+    if (rows.length < count || allRows.length >= maxThreads) break;
+    if (pg < maxPages - 1) await new Promise((r) => setTimeout(r, 180));
+  }
+
+  return allRows.length > 0 ? allRows : null;
+}
+
+// ─── fin Voyager API inbox sync ────────────────────────────────────────────
+
 async function runMessagingInboxSync(
   page: Page,
   sb: SupabaseClient,
@@ -1331,36 +1578,35 @@ async function runMessagingInboxSync(
   // (HTML vivo suele incluir /messaging/thread/… en outerHTML o en <a href>).
   // Fallback: clic por fila si no hay suficientes ids en DOM (umbral INBOX_SYNC_BULK_MIN_ROWS).
 
-  // Usar viewport ancho (≥1300px) para forzar el modo split-view de LinkedIn,
-  // donde el panel de lista y el panel del hilo coexisten (permite extraer foto del header).
-  await page.setViewportSize({ width: 1536, height: 864 }).catch(() => {});
-
+  // ── Estrategia 1: Voyager API (fetch interno) — sin navegaciones ni clics ──
   await page.goto("https://www.linkedin.com/messaging/", { waitUntil: "domcontentloaded", timeout: 60000 });
   await new Promise((r) => setTimeout(r, inboxEnvInt("INBOX_PAGE_SETTLE_MS", 900)));
-  await page
-    .locator("main, .application-outlet, aside")
-    .first()
-    .waitFor({ state: "visible", timeout: 25000 })
-    .catch(() => {});
+  await page.locator("main, .application-outlet, aside").first().waitFor({ state: "visible", timeout: 25000 }).catch(() => {});
+
+  const voyagerRows = await runMessagingInboxSyncVoyager(page, opts.maxThreads, 15_000);
+  if (voyagerRows) {
+    await bulkUpsertInboxConversationsOrdered(sb, accountId, voyagerRows, Date.now());
+    console.log(`[inbox_sync] completado vía Voyager API (${voyagerRows.length} conversaciones)`);
+    return;
+  }
+  console.log("[inbox_sync] Voyager API no disponible — usando fallback DOM");
+
+  // ── Estrategia 2 (fallback): scroll + extracción de lista DOM ──────────────
+  // Usar viewport ancho (≥1300px) para forzar el modo split-view de LinkedIn.
+  await page.setViewportSize({ width: 1536, height: 864 }).catch(() => {});
   await new Promise((r) => setTimeout(r, inboxEnvInt("INBOX_AFTER_MAIN_VISIBLE_MS", 400)));
 
-  // Scroll + extracción ordenada (misma pasada): recorre la lista como en LinkedIn y obtiene thread ids del HTML vivo.
   const orderedRows = await collectInboxRowsWithScroll(page, opts.maxThreads);
   if (orderedRows.length > 0) {
     await bulkUpsertInboxConversationsOrdered(sb, accountId, orderedRows, Date.now());
   }
-  // Por debajo de este umbral la lista DOM se considera poco fiable → modo clic (lento). Mantener sync completo.
   const bulkMin = inboxEnvInt("INBOX_SYNC_BULK_MIN_ROWS", 4);
   if (orderedRows.length >= bulkMin) {
-    console.log(
-      `[inbox_sync] completado vía lista DOM ordenada (${orderedRows.length} conversaciones, umbral ${bulkMin}); sin clic por fila`
-    );
+    console.log(`[inbox_sync] completado vía lista DOM (${orderedRows.length} conversaciones)`);
     return;
   }
   if (orderedRows.length > 0) {
-    console.log(
-      `[inbox_sync] lista DOM parcial (${orderedRows.length} < ${bulkMin}); se completará con clic por fila`
-    );
+    console.log(`[inbox_sync] lista DOM parcial (${orderedRows.length} < ${bulkMin}); completando con clic por fila`);
   } else {
     console.log("[inbox_sync] sin ids en lista DOM — modo clic por fila");
   }
