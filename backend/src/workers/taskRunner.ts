@@ -32,6 +32,7 @@ import {
   MAX_BROWSERS,
   acquireBrowserSlot,
   checkUnderDailyCap,
+  enqueueTaskDue,
   incrementDailyCount,
   popDueTaskIds,
   releaseBrowserSlot,
@@ -2020,7 +2021,7 @@ async function failTask(
     .from("tasks")
     .update({ status: "pending", error_message: finalMsg, scheduled_at: next })
     .eq("id", taskId);
-  const { enqueueTaskDue } = await import("../queues/redisClient.js");
+
   await enqueueTaskDue(redis, taskId, new Date(next).getTime());
 }
 
@@ -2088,7 +2089,7 @@ export async function runOneTask(sb: SupabaseClient, redis: RedisClient, taskId:
         attempts: Math.max(0, (task.attempts as number) - 1),
       })
       .eq("id", taskId);
-    const { enqueueTaskDue } = await import("../queues/redisClient.js");
+  
     await enqueueTaskDue(redis, taskId, next);
     return;
   }
@@ -2101,18 +2102,27 @@ export async function runOneTask(sb: SupabaseClient, redis: RedisClient, taskId:
     return;
   }
 
-  const gotSlot = await acquireBrowserSlot(redis);
+  // acquireBrowserSlot fuera del try/finally: si Redis falla aquí el slot no se corrompe
+  // (nunca se incrementó), pero la tarea quedaría "running". Por eso capturamos el error
+  // y tratamos una excepción igual que gotSlot=false: reprogramar sin gastar un intento.
+  let gotSlot = false;
+  try {
+    gotSlot = await acquireBrowserSlot(redis);
+  } catch (slotErr) {
+    console.error(`[worker] acquireBrowserSlot error (${taskId.slice(0, 8)}):`, slotErr instanceof Error ? slotErr.message : slotErr);
+  }
   if (!gotSlot) {
+    const reschedAt = new Date(Date.now() + 15_000).toISOString();
     await sb
       .from("tasks")
       .update({
         status: "pending",
-        scheduled_at: new Date(Date.now() + 15_000).toISOString(),
+        scheduled_at: reschedAt,
         attempts: Math.max(0, (task.attempts as number) - 1),
       })
-      .eq("id", taskId);
-    const { enqueueTaskDue } = await import("../queues/redisClient.js");
-    await enqueueTaskDue(redis, taskId, Date.now() + 15_000);
+      .eq("id", taskId)
+      .catch((e: unknown) => console.error("[worker] reschedule no-slot:", e));
+    await enqueueTaskDue(redis, taskId, Date.now() + 15_000).catch(() => {});
     return;
   }
 
@@ -2237,7 +2247,7 @@ export async function runOneTask(sb: SupabaseClient, redis: RedisClient, taskId:
             li_photo_url: null,
           })
           .eq("id", accountId);
-        await afterSuccess(0);
+        await afterSuccess();
         return;
       }
 
@@ -2268,7 +2278,7 @@ export async function runOneTask(sb: SupabaseClient, redis: RedisClient, taskId:
           li_photo_url: profile.photoUrl,
         })
         .eq("id", accountId);
-      await afterSuccess(0);
+      await afterSuccess();
       return;
     }
 
@@ -2293,7 +2303,7 @@ export async function runOneTask(sb: SupabaseClient, redis: RedisClient, taskId:
           session_verified_at: verifiedAt,
         })
         .eq("id", accountId);
-      await afterSuccess(0);
+      await afterSuccess();
       return;
     }
 
@@ -2352,7 +2362,7 @@ export async function runOneTask(sb: SupabaseClient, redis: RedisClient, taskId:
       console.log(
         `[sync_linkedin_posts] account=${accountId.slice(0, 8)}… pid=${pidLog} items=${scraped.length}`
       );
-      await afterSuccess(0);
+      await afterSuccess();
       return;
     }
 
@@ -2387,7 +2397,7 @@ export async function runOneTask(sb: SupabaseClient, redis: RedisClient, taskId:
             attempts: Math.max(0, (task.attempts as number) - 1),
           })
           .eq("id", taskId);
-        const { enqueueTaskDue } = await import("../queues/redisClient.js");
+      
         await enqueueTaskDue(redis, taskId, tomorrow.getTime());
         return;
       }
@@ -2416,14 +2426,14 @@ export async function runOneTask(sb: SupabaseClient, redis: RedisClient, taskId:
     if (action === "sync_lead_photo") {
       // Tarea obsoleta: la foto principal ya no se consulta visitando el perfil uno por uno 
       // para no interrumpir el flujo del worker con ventanas aleatorias de perfiles.
-      await afterSuccess(0);
+      await afterSuccess();
       return;
     }
 
     if (action === "batch_sync_lead_photos") {
       // Tarea obsoleta: la foto principal ya se obtiene vía harvestapi/linkedin-profile-search.
       // Se omite visitar el perfil para no agotar el cupo ni generar loops infinitos pendientes.
-      await afterSuccess(0);
+      await afterSuccess();
       return;
     }
 
@@ -2504,7 +2514,7 @@ export async function runOneTask(sb: SupabaseClient, redis: RedisClient, taskId:
             attempts: Math.max(0, (task.attempts as number) - 1),
           })
           .eq("id", taskId);
-        const { enqueueTaskDue } = await import("../queues/redisClient.js");
+      
         await enqueueTaskDue(redis, taskId, tomorrow.getTime());
         return;
       }
@@ -2552,7 +2562,7 @@ export async function runOneTask(sb: SupabaseClient, redis: RedisClient, taskId:
             attempts: Math.max(0, (task.attempts as number) - 1),
           })
           .eq("id", taskId);
-        const { enqueueTaskDue } = await import("../queues/redisClient.js");
+      
         await enqueueTaskDue(redis, taskId, tomorrow.getTime());
         return;
       }
@@ -2597,7 +2607,7 @@ export async function runOneTask(sb: SupabaseClient, redis: RedisClient, taskId:
             attempts: Math.max(0, (task.attempts as number) - 1),
           })
           .eq("id", taskId);
-        const { enqueueTaskDue } = await import("../queues/redisClient.js");
+      
         await enqueueTaskDue(redis, taskId, tomorrow.getTime());
         return;
       }
@@ -2642,7 +2652,7 @@ export async function runOneTask(sb: SupabaseClient, redis: RedisClient, taskId:
             attempts: Math.max(0, (task.attempts as number) - 1),
           })
           .eq("id", taskId);
-        const { enqueueTaskDue } = await import("../queues/redisClient.js");
+      
         await enqueueTaskDue(redis, taskId, tomorrow.getTime());
         return;
       }
@@ -2730,7 +2740,7 @@ export async function runOneTask(sb: SupabaseClient, redis: RedisClient, taskId:
             attempts: Math.max(0, (task.attempts as number) - 1),
           })
           .eq("id", taskId);
-        const { enqueueTaskDue } = await import("../queues/redisClient.js");
+      
         await enqueueTaskDue(redis, taskId, tomorrow.getTime());
         return;
       }
@@ -2818,7 +2828,7 @@ export async function runOneTask(sb: SupabaseClient, redis: RedisClient, taskId:
             : {}),
         })
         .eq("id", postId);
-      await afterSuccess(0);
+      await afterSuccess();
       return;
     }
 
@@ -3194,7 +3204,7 @@ export async function runOneTask(sb: SupabaseClient, redis: RedisClient, taskId:
                 attempts: Math.max(0, (task.attempts as number) - 1),
               })
               .eq("id", taskId);
-            const { enqueueTaskDue } = await import("../queues/redisClient.js");
+          
             await enqueueTaskDue(redis, taskId, Date.now() + 20_000);
             return;
           }
@@ -3360,7 +3370,7 @@ export async function runOneTask(sb: SupabaseClient, redis: RedisClient, taskId:
             attempts: Math.max(0, (task.attempts as number) - 1),
           })
           .eq("id", taskId);
-        const { enqueueTaskDue } = await import("../queues/redisClient.js");
+      
         await enqueueTaskDue(redis, taskId, tomorrow.getTime());
         return;
       }
