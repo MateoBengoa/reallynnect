@@ -40,7 +40,7 @@ import {
 import type { LimitKind, RedisClient } from "../queues/redisClient.js";
 import { decryptSecret } from "../lib/crypto.js";
 import { dispatchTaskWebhook } from "../lib/taskWebhook.js";
-import { advanceEnrollmentAfterStep } from "../services/campaignEngine.js";
+import { advanceEnrollmentAfterStep, failEnrollmentAfterDeadTask } from "../services/campaignEngine.js";
 import { generateConnectionMessage, generateDmReply, generateImageBytes } from "../services/gemini.js";
 import { loadProxy, markProxyDegraded, markProxyUsed, pickProxyForAccount } from "../services/proxyAssign.js";
 import { enrichWorkerFailureMessage, startPlaywrightTraceIfConfigured, type TraceController } from "./linkedinRunContext.js";
@@ -2006,6 +2006,11 @@ async function failTask(
     if (accId && (action === "verify_session" || action === "session_check")) {
       await sb.from("linkedin_accounts").update({ connection_status: "error" }).eq("id", accId);
     }
+    // Marcar el enrollment como fallido para que no quede huérfano sin tarea pendiente
+    const enrollmentId = task.enrollment_id as string | undefined;
+    if (enrollmentId) {
+      await failEnrollmentAfterDeadTask(sb, enrollmentId);
+    }
     return;
   }
 
@@ -2050,7 +2055,7 @@ export async function runOneTask(sb: SupabaseClient, redis: RedisClient, taskId:
     await completeTask(sb, redis, taskId);
     const enrollmentId = task.enrollment_id as string | undefined;
     if (enrollmentId) {
-      await advanceEnrollmentAfterStep(sb, redis, enrollmentId, 0);
+      await advanceEnrollmentAfterStep(sb, redis, enrollmentId);
     }
     return;
   }
@@ -2196,24 +2201,11 @@ export async function runOneTask(sb: SupabaseClient, redis: RedisClient, taskId:
       }
     }
 
-    const afterSuccess = async (delayHoursForNext: number) => {
+    const afterSuccess = async () => {
       await completeTask(sb, redis, taskId);
       if (enrollmentId) {
-        await advanceEnrollmentAfterStep(sb, redis, enrollmentId, delayHoursForNext);
+        await advanceEnrollmentAfterStep(sb, redis, enrollmentId);
       }
-    };
-
-    const getNextStepDelay = async (): Promise<number> => {
-      if (!enrollmentId) return 0;
-      const { data: en } = await sb.from("campaign_enrollments").select("campaign_id, current_step_index").eq("id", enrollmentId).single();
-      if (!en) return 0;
-      const { data: steps } = await sb
-        .from("campaign_steps")
-        .select("delay_hours")
-        .eq("campaign_id", en.campaign_id)
-        .order("step_order", { ascending: true });
-      const nextIdx = (en.current_step_index ?? 0) + 1;
-      return steps?.[nextIdx]?.delay_hours ?? 0;
     };
 
     if (action === "verify_session" || action === "session_check") {
@@ -2368,7 +2360,7 @@ export async function runOneTask(sb: SupabaseClient, redis: RedisClient, taskId:
         return;
       }
       await sb.from("linkedin_accounts").update({ last_warmup_at: new Date().toISOString() }).eq("id", accountId);
-      await afterSuccess(await getNextStepDelay());
+      await afterSuccess();
       return;
     }
 
@@ -2408,7 +2400,7 @@ export async function runOneTask(sb: SupabaseClient, redis: RedisClient, taskId:
         profileUrl,
       });
       await incrementDailyCount(redis, accountId, "visit", accountDailyCap(account, "visit"));
-      await afterSuccess(await getNextStepDelay());
+      await afterSuccess();
       return;
     }
 
@@ -2438,7 +2430,7 @@ export async function runOneTask(sb: SupabaseClient, redis: RedisClient, taskId:
         await fail(r.error ?? "follow_failed");
         return;
       }
-      await afterSuccess(await getNextStepDelay());
+      await afterSuccess();
       return;
     }
 
@@ -2454,7 +2446,7 @@ export async function runOneTask(sb: SupabaseClient, redis: RedisClient, taskId:
         await fail(r.error ?? "like_failed");
         return;
       }
-      await afterSuccess(await getNextStepDelay());
+      await afterSuccess();
       return;
     }
 
@@ -2485,7 +2477,7 @@ export async function runOneTask(sb: SupabaseClient, redis: RedisClient, taskId:
         await fail(r.error ?? "comment_failed");
         return;
       }
-      await afterSuccess(await getNextStepDelay());
+      await afterSuccess();
       return;
     }
 
@@ -2533,7 +2525,7 @@ export async function runOneTask(sb: SupabaseClient, redis: RedisClient, taskId:
         return;
       }
       await incrementDailyCount(redis, accountId, "connect", accountDailyCap(account, "connect"));
-      await afterSuccess(await getNextStepDelay());
+      await afterSuccess();
       return;
     }
 
@@ -2578,7 +2570,7 @@ export async function runOneTask(sb: SupabaseClient, redis: RedisClient, taskId:
         return;
       }
       await incrementDailyCount(redis, accountId, "message", accountDailyCap(account, "message"));
-      await afterSuccess(await getNextStepDelay());
+      await afterSuccess();
       return;
     }
 
@@ -2623,7 +2615,7 @@ export async function runOneTask(sb: SupabaseClient, redis: RedisClient, taskId:
         return;
       }
       await incrementDailyCount(redis, accountId, "message", accountDailyCap(account, "message"));
-      await afterSuccess(await getNextStepDelay());
+      await afterSuccess();
       return;
     }
 
@@ -2678,7 +2670,7 @@ export async function runOneTask(sb: SupabaseClient, redis: RedisClient, taskId:
           return;
         }
         await incrementDailyCount(redis, accountId, "message", accountDailyCap(account, "message"));
-        await afterSuccess(await getNextStepDelay());
+        await afterSuccess();
       } finally {
         await fs.unlink(tmpPath).catch(() => {});
       }
@@ -2711,7 +2703,7 @@ export async function runOneTask(sb: SupabaseClient, redis: RedisClient, taskId:
         await fail(r.error ?? "reply_comment_failed");
         return;
       }
-      await afterSuccess(await getNextStepDelay());
+      await afterSuccess();
       return;
     }
 
@@ -2769,7 +2761,7 @@ export async function runOneTask(sb: SupabaseClient, redis: RedisClient, taskId:
         return;
       }
       await incrementDailyCount(redis, accountId, "message", accountDailyCap(account, "message"));
-      await afterSuccess(await getNextStepDelay());
+      await afterSuccess();
       return;
     }
 

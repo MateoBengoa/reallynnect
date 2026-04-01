@@ -286,11 +286,15 @@ export async function scheduleEnrollmentStep(
   return true;
 }
 
+/**
+ * Avanza el enrollment al siguiente paso usando el delay_hours configurado
+ * en ese step (no necesita que el llamador lo calcule por separado).
+ * Si no hay más pasos, marca el enrollment como completado.
+ */
 export async function advanceEnrollmentAfterStep(
   sb: SupabaseClient,
   redis: RedisClient,
-  enrollmentId: string,
-  delayHoursBeforeNextStep: number
+  enrollmentId: string
 ): Promise<void> {
   const { data: en } = await sb.from("campaign_enrollments").select("*").eq("id", enrollmentId).single();
   if (!en) return;
@@ -312,7 +316,10 @@ export async function advanceEnrollmentAfterStep(
     return;
   }
 
-  const nextRun = new Date(Date.now() + delayHoursBeforeNextStep * 3600 * 1000).toISOString();
+  // Usa el delay_hours del próximo paso como espera antes de ejecutarlo
+  const nextStep = steps[nextIdx] as Record<string, unknown>;
+  const delayHours = typeof nextStep.delay_hours === "number" ? nextStep.delay_hours : 0;
+  const nextRun = new Date(Date.now() + delayHours * 3600 * 1000).toISOString();
 
   await sb
     .from("campaign_enrollments")
@@ -323,6 +330,21 @@ export async function advanceEnrollmentAfterStep(
     .eq("id", enrollmentId);
 
   await scheduleEnrollmentStep(sb, redis, enrollmentId);
+}
+
+/**
+ * Marca el enrollment como fallido (tarea agotó reintentos).
+ * Evita que la inscripción quede "huérfana" sin tarea pendiente.
+ */
+export async function failEnrollmentAfterDeadTask(
+  sb: SupabaseClient,
+  enrollmentId: string
+): Promise<void> {
+  await sb
+    .from("campaign_enrollments")
+    .update({ status: "failed" })
+    .eq("id", enrollmentId)
+    .eq("status", "active"); // solo si sigue activo; no pisar paused/completed
 }
 
 export type CreateEnrollmentsResult = {
