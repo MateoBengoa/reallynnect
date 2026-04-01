@@ -2133,10 +2133,10 @@ export async function runOneTask(sb: SupabaseClient, redis: RedisClient, taskId:
     let proxyId = account.proxy_id as string | null;
     let proxyRow = proxyId ? await loadProxy(sb, proxyId) : null;
 
-    if (!proxyRow && proxyId) {
-      const newPid = await pickProxyForAccount(sb, proxyId);
+    if (!proxyRow) {
+      // Intenta asignar un proxy libre del pool del usuario
+      const newPid = await pickProxyForAccount(sb, account.user_id as string, accountId, proxyId).catch(() => null);
       if (newPid) {
-        await sb.from("linkedin_accounts").update({ proxy_id: newPid }).eq("id", accountId);
         proxyId = newPid;
         proxyRow = await loadProxy(sb, newPid);
       }

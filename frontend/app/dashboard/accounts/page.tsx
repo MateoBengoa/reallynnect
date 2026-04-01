@@ -18,6 +18,7 @@ type Account = {
   daily_visit_budget: number | null;
   daily_connect_budget: number | null;
   rotation_priority: number;
+  proxy_id: string | null;
 };
 
 function verificationLabel(a: Account): string {
@@ -292,6 +293,16 @@ export default function AccountsPage() {
               <span className="rounded-[var(--radius-sm)] bg-[color-mix(in_srgb,var(--text)_6%,var(--surface))] px-2 py-0.5 text-xs text-[var(--muted)]">
                 {a.connection_status}
                 {a.connection_status === "pending" ? " · …" : ""} · {a.softban_status}
+              </span>
+              <span
+                className={`rounded-[var(--radius-sm)] px-2 py-0.5 text-xs ${
+                  a.proxy_id
+                    ? "bg-green-500/10 text-green-400"
+                    : "bg-amber-500/10 text-amber-400"
+                }`}
+                title={a.proxy_id ? `Proxy: ${a.proxy_id}` : "Sin proxy asignado"}
+              >
+                {a.proxy_id ? "proxy ✓" : "sin proxy"}
               </span>
               <button type="button" className="btn-danger w-full sm:w-auto" onClick={() => remove(a.id)}>
                 Eliminar
