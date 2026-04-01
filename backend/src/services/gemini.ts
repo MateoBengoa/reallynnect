@@ -30,7 +30,11 @@ Write a short helpful professional reply under 400 characters. Output only the r
 export async function generatePost(topic: string): Promise<{ text: string; imageDescription?: string }> {
   const prompt = `Generate a professional LinkedIn post about: ${topic}.
 Tone: thought leadership, educational, engaging.
-Return JSON only: {"post":"...","imageDescription":"optional short illustration prompt"}`;
+Return JSON only (no markdown fences):
+{
+  "post": "the full post text",
+  "imageDescription": "A detailed visual scene for a LinkedIn illustration DIRECTLY inspired by the post content and key ideas. Describe: specific objects or metaphors that appear in the post, the color palette (professional, 2-3 colors), style (flat design, minimal, clean lines), mood and composition. The scene must visually represent the core message, NOT a generic business image. No people faces, no text or logos in the image."
+}`;
   const raw = await callGeminiText(prompt);
   try {
     const j = JSON.parse(raw.replace(/^```json\s*|\s*```$/g, "")) as {
@@ -50,10 +54,16 @@ export async function generateImageBytes(imagePrompt: string): Promise<Buffer | 
   const model = process.env.GEMINI_IMAGE_MODEL ?? DEFAULT_MODEL;
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${key}`;
 
+  const fullPrompt = [
+    "Create a professional LinkedIn post illustration with these exact specifications:",
+    imagePrompt,
+    "Additional requirements: flat design style, clean minimal composition, no human faces, absolutely no text or watermarks, suitable for a B2B professional audience, high contrast, print-quality.",
+  ].join("\n");
+
   const body = {
     contents: [
       {
-        parts: [{ text: `Generate an illustration for a LinkedIn post: ${imagePrompt}` }],
+        parts: [{ text: fullPrompt }],
       },
     ],
     generationConfig: { responseModalities: ["TEXT", "IMAGE"] },
