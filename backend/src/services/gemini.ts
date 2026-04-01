@@ -48,25 +48,22 @@ Return JSON only (no markdown fences):
 }
 
 /**
- * Genera un art direction brief en inglés para la imagen del post.
- * Usa metáforas concretas y referencias de estilo (Airbnb/Stripe/Headspace)
- * para que el modelo de imagen no caiga en el estilo sci-fi por defecto.
+ * Genera un prompt fotográfico profesional para la imagen del post.
  */
 export async function generateIllustrationBrief(topic: string, postText: string): Promise<string> {
-  const prompt = `You are an art director creating a LinkedIn post illustration brief.
+  const prompt = `You are a professional photographer and LinkedIn content creator.
 
 Topic: "${topic}"
 Post excerpt: "${postText.slice(0, 400)}"
 
-Write a single-paragraph image prompt (max 120 words) for an AI image generator. Requirements:
-- Choose ONE specific scene with 2-3 concrete objects that metaphorically represent the post's core idea
-- Objects must be from everyday life: people, furniture, plants, books, tools, food, architecture, nature — never AI hardware, chips, circuits, code, or glowing brains
-- Specify the exact art style: "flat vector illustration in the style of Airbnb or Stripe design system" OR "isometric illustration like Headspace app" OR "minimal editorial illustration like The Economist cover"
-- Name the exact 3 colors (hex or color names): warm and professional palette
-- Lighting: soft and even, no dramatic effects
-- End with: "White background. No text. No faces."
+Write a photorealistic image generation prompt (max 100 words) that:
+1. Shows 1-2 real professional people DIRECTLY engaged in an activity related to the topic (e.g. if topic is "AI tools" → a person working on a laptop in a modern office, screen visible with clean UI; if topic is "leadership" → a confident person addressing a small team in a bright boardroom)
+2. The scene must VISUALLY COMMUNICATE the post topic — someone looking at it should immediately understand what the post is about
+3. Style: clean editorial photography, natural daylight or warm office lighting, shallow depth of field, minimal background
+4. NO fantasy, NO floating objects, NO glowing elements, NO abstract concepts — only real-world scenes
+5. End with: "Shot on Sony A7R, 50mm lens, soft natural light. No text overlays."
 
-Output ONLY the prompt paragraph, nothing else.`;
+Output ONLY the prompt, nothing else.`;
 
   return (await callGeminiText(prompt)).trim().slice(0, 700);
 }
