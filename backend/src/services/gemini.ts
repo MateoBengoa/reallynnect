@@ -49,23 +49,32 @@ Return JSON only (no markdown fences):
 
 /**
  * Genera un prompt fotográfico profesional para la imagen del post.
+ * El brief describe la ACTIVIDAD HUMANA detrás del tema, nunca elementos tech/IA.
  */
 export async function generateIllustrationBrief(topic: string, postText: string): Promise<string> {
-  const prompt = `You are a professional photographer and LinkedIn content creator.
+  const prompt = `You are a editorial stock photographer. Your job is to describe a real-world photo scene for a LinkedIn post.
 
-Topic: "${topic}"
+Post topic: "${topic}"
 Post excerpt: "${postText.slice(0, 400)}"
 
-Write a photorealistic image generation prompt (max 100 words) that:
-1. Shows 1-2 real professional people DIRECTLY engaged in an activity related to the topic (e.g. if topic is "AI tools" → a person working on a laptop in a modern office, screen visible with clean UI; if topic is "leadership" → a confident person addressing a small team in a bright boardroom)
-2. The scene must VISUALLY COMMUNICATE the post topic — someone looking at it should immediately understand what the post is about
-3. Style: clean editorial photography, natural daylight or warm office lighting, shallow depth of field, minimal background
-4. NO fantasy, NO floating objects, NO glowing elements, NO abstract concepts — only real-world scenes
-5. End with: "Shot on Sony A7R, 50mm lens, soft natural light. No text overlays."
+Rules:
+- Describe what a PHOTOGRAPHER could literally capture with a camera — no digital art, no illustrations
+- Focus on the HUMAN OUTCOME or EMOTION behind the topic, not the technology itself
+  (e.g. "AI productivity" → a relaxed professional reviewing a printed report with a coffee, satisfied expression; NOT a person with holographic AI diagrams)
+  (e.g. "leadership" → a confident woman standing at a whiteboard explaining something to 2 attentive colleagues)
+  (e.g. "data analysis" → a focused analyst circling numbers on a printed spreadsheet at a clean desk)
+- 1-2 real people maximum, clearly showing emotion or action that communicates the post message
+- Environment: modern office, coffee shop, or meeting room — real furniture, real light
+- NEVER include: screens showing UIs, glowing effects, holographic elements, floating text, neural networks, circuits, neon lights, robots, digital overlays, sci-fi elements
+- Lighting: natural window light or warm overhead office light, no dramatic shadows
+- Composition: shallow depth of field, subject in focus, clean background
 
-Output ONLY the prompt, nothing else.`;
+Write ONLY the scene description in 2-3 sentences. No introduction, no explanation.`;
 
-  return (await callGeminiText(prompt)).trim().slice(0, 700);
+  const brief = (await callGeminiText(prompt)).trim().slice(0, 600);
+
+  // Prepend hard negative prefix so the image model ignores its default "AI aesthetic"
+  return `Photorealistic DSLR photograph, Canon 5D Mark IV. No digital effects, no glowing elements, no holographic UI, no floating text, no neural network diagrams, no neon lights, no sci-fi elements, no illustrations, no digital art. ${brief} Editorial style, shallow depth of field, soft natural light, shot on 50mm lens. No text in image.`;
 }
 
 export async function generateImageBytes(imagePrompt: string): Promise<Buffer | null> {
