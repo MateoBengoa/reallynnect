@@ -2121,7 +2121,7 @@ export async function runOneTask(sb: SupabaseClient, redis: RedisClient, taskId:
         attempts: Math.max(0, (task.attempts as number) - 1),
       })
       .eq("id", taskId)
-      .catch((e: unknown) => console.error("[worker] reschedule no-slot:", e));
+      .then(undefined, (e: unknown) => console.error("[worker] reschedule no-slot:", e));
     await enqueueTaskDue(redis, taskId, Date.now() + 15_000).catch(() => {});
     return;
   }
