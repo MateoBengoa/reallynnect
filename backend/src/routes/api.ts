@@ -1531,62 +1531,85 @@ export async function registerApiRoutes(app: FastifyInstance) {
   app.get("/crm-summary", async (req) => {
     const userId = req.userId!;
 
-    // Cuentas del usuario
-    const { data: accounts } = await sb.from("linkedin_accounts").select("id,connection_status,li_display_name").eq("user_id", userId);
-    const accountIds = (accounts ?? []).map((a) => a.id);
+    // ── Fetch paralelo de datos independientes ──────────────────────────────
+    const [
+      { data: accounts },
+      { data: userCampaigns },
+      { count: totalLeads },
+      { data: campaigns },
+    ] = await Promise.all([
+      sb.from("linkedin_accounts").select("id,connection_status").eq("user_id", userId),
+      sb.from("campaigns").select("id").eq("user_id", userId),
+      sb.from("leads").select("id", { count: "exact", head: true }).eq("user_id", userId),
+      sb.from("campaigns").select("id,name,status").eq("user_id", userId).eq("status", "active"),
+    ]);
 
-    // Pipeline: enrollments agrupados por crm_status
-    const { data: enrollments } = await sb
-      .from("campaign_enrollments")
-      .select("crm_status, status, campaign_id, lead_id, leads(id, name, photo_url, title, company)")
-      .in("campaign_id", (await sb.from("campaigns").select("id").eq("user_id", userId)).data?.map((c) => c.id) ?? []);
+    const accountIds = (accounts ?? []).map((a) => a.id as string);
+    const campaignIds = (userCampaigns ?? []).map((c) => c.id as string);
 
+    // ── Pipeline: enrollments agrupados por crm_status ──────────────────────
     const pipeline: Record<string, number> = {
       not_contacted: 0, in_campaign: 0, contacted: 0, replied: 0, not_accepted: 0, blacklist: 0,
     };
-    for (const e of enrollments ?? []) {
-      const k = e.crm_status as string;
-      if (k in pipeline) pipeline[k]++;
+    type EnrollLeadRow = { crm_status: string; lead_id: string; leads: { id: string; name: string | null; photo_url: string | null; title: string | null; company: string | null } | null };
+    let enrollments: EnrollLeadRow[] = [];
+
+    if (campaignIds.length) {
+      const { data: enRows } = await sb
+        .from("campaign_enrollments")
+        .select("crm_status, lead_id, leads!lead_id(id, name, photo_url, title, company)")
+        .in("campaign_id", campaignIds);
+      enrollments = (enRows ?? []).map((e) => ({
+        crm_status: String(e.crm_status ?? ""),
+        lead_id: String(e.lead_id ?? ""),
+        leads: (e.leads as unknown) as EnrollLeadRow["leads"],
+      }));
+      for (const e of enrollments) {
+        if (e.crm_status in pipeline) pipeline[e.crm_status]++;
+      }
     }
 
-    // Últimos 8 leads que respondieron (replied)
-    const recentReplied = (enrollments ?? [])
+    const recentReplied = enrollments
       .filter((e) => e.crm_status === "replied")
       .slice(0, 8)
-      .map((e) => {
-        const l = (e.leads as unknown) as { id: string; name: string | null; photo_url: string | null; title: string | null; company: string | null } | null;
-        return { lead_id: e.lead_id, name: l?.name ?? null, photo_url: l?.photo_url ?? null, title: l?.title ?? null, company: l?.company ?? null };
-      });
+      .map((e) => ({
+        lead_id: e.lead_id,
+        name: e.leads?.name ?? null,
+        photo_url: e.leads?.photo_url ?? null,
+        title: e.leads?.title ?? null,
+        company: e.leads?.company ?? null,
+      }));
 
-    // Campañas activas
-    const { data: campaigns } = await sb.from("campaigns").select("id,name,status").eq("user_id", userId).eq("status", "active");
+    // ── Tareas: conteos por estado (paralelo) ───────────────────────────────
+    const taskStatuses = ["pending", "running", "completed", "dead"] as const;
+    let taskCounts: Record<string, number> = { pending: 0, running: 0, completed: 0, dead: 0 };
+    if (accountIds.length) {
+      const results = await Promise.all(
+        taskStatuses.map((s) =>
+          sb.from("tasks").select("id", { count: "exact", head: true }).in("account_id", accountIds).eq("status", s)
+        )
+      );
+      taskCounts = Object.fromEntries(taskStatuses.map((s, i) => [s, results[i].count ?? 0]));
+    }
 
-    // Tareas: conteo por estado
-    const taskCountsRaw = await Promise.all(
-      (["pending", "running", "completed", "dead"] as const).map(async (s) => {
-        const { count } = await sb.from("tasks").select("id", { count: "exact", head: true }).in("account_id", accountIds).eq("status", s);
-        return [s, count ?? 0] as const;
-      })
-    );
-    const taskCounts = Object.fromEntries(taskCountsRaw);
-
-    // Últimos 6 mensajes enviados
-    const { data: recentMessages } = await sb
-      .from("messages")
-      .select("id, body, created_at, direction, account_id, peer_name, peer_photo_url")
-      .in("account_id", accountIds)
-      .order("created_at", { ascending: false })
-      .limit(6);
-
-    // Total leads
-    const { count: totalLeads } = await sb.from("leads").select("id", { count: "exact", head: true }).eq("user_id", userId);
+    // ── Conversaciones recientes del inbox ──────────────────────────────────
+    let recentConversations: { id: string; peer_name: string | null; peer_photo_url: string | null; list_preview: string | null; list_last_activity_at: string | null }[] = [];
+    if (accountIds.length) {
+      const { data: convRows } = await sb
+        .from("inbox_conversations")
+        .select("id, peer_name, peer_photo_url, list_preview, list_last_activity_at")
+        .in("account_id", accountIds)
+        .order("list_last_activity_at", { ascending: false, nullsFirst: false })
+        .limit(6);
+      recentConversations = (convRows ?? []) as typeof recentConversations;
+    }
 
     return {
       pipeline,
       recent_replied: recentReplied,
       campaigns_active: campaigns ?? [],
       task_counts: taskCounts,
-      recent_messages: recentMessages ?? [],
+      recent_conversations: recentConversations,
       total_leads: totalLeads ?? 0,
       accounts_active: (accounts ?? []).filter((a) => a.connection_status === "active").length,
     };

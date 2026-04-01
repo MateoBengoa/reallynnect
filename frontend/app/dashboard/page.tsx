@@ -12,7 +12,7 @@ type CrmSummary = {
   recent_replied: { lead_id: string; name: string | null; photo_url: string | null; title: string | null; company: string | null }[];
   campaigns_active: { id: string; name: string; status: string }[];
   task_counts: Record<string, number>;
-  recent_messages: { id: string; body: string; created_at: string; direction: string; peer_name: string | null; peer_photo_url: string | null }[];
+  recent_conversations: { id: string; peer_name: string | null; peer_photo_url: string | null; list_preview: string | null; list_last_activity_at: string | null }[];
   total_leads: number;
   accounts_active: number;
 };
@@ -139,27 +139,27 @@ export default function DashboardHome() {
           </ul>
         </section>
 
-        {/* Mensajes recientes */}
+        {/* Conversaciones recientes */}
         <section className="card overflow-hidden">
           <div className="flex items-center justify-between border-b border-[var(--border)] px-4 py-3">
             <h2 className="text-sm font-semibold text-[var(--text)]">Actividad reciente</h2>
             <Link href="/dashboard/inbox" className="text-[11px] text-[var(--accent)] hover:underline">Ver inbox →</Link>
           </div>
           <ul className="divide-y divide-[var(--border)]">
-            {(data?.recent_messages ?? []).length === 0 && (
+            {(data?.recent_conversations ?? []).length === 0 && (
               <li className="px-4 py-6 text-center text-xs text-[var(--muted)]">Sin mensajes aún</li>
             )}
-            {(data?.recent_messages ?? []).map((m) => (
+            {(data?.recent_conversations ?? []).map((m) => (
               <li key={m.id} className="flex items-start gap-3 px-4 py-3 hover:bg-[color-mix(in_srgb,var(--text)_3%,var(--surface))]">
                 <Avatar name={m.peer_name} photo={m.peer_photo_url} size={7} />
                 <div className="min-w-0 flex-1">
                   <div className="flex items-center justify-between gap-1">
                     <p className="truncate text-xs font-medium text-[var(--text)]">{m.peer_name ?? "—"}</p>
-                    <span className="shrink-0 text-[10px] text-[var(--muted)]">{relTime(m.created_at)}</span>
+                    {m.list_last_activity_at && (
+                      <span className="shrink-0 text-[10px] text-[var(--muted)]">{relTime(m.list_last_activity_at)}</span>
+                    )}
                   </div>
-                  <p className="truncate text-[11px] text-[var(--muted)]">
-                    {m.direction === "outbound" ? "→ " : ""}{m.body?.slice(0, 60) ?? "—"}
-                  </p>
+                  <p className="truncate text-[11px] text-[var(--muted)]">{m.list_preview ?? "—"}</p>
                 </div>
               </li>
             ))}
