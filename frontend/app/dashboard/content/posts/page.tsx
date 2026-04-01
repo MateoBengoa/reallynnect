@@ -304,11 +304,11 @@ export default function ContentPostsPage() {
       </div>
 
       <h2 className={`${labelCap} mb-3`}>Publicaciones</h2>
-      <div className="mb-10 grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
+      <div className="mb-10 grid grid-cols-1 gap-5 sm:grid-cols-2">
         <button
           type="button"
           onClick={openWizard}
-          className="group flex min-h-[11rem] flex-col items-center justify-center gap-3 rounded-[var(--radius-lg)] border-2 border-dashed border-[color-mix(in_srgb,var(--muted)_38%,var(--border))] bg-[color-mix(in_srgb,var(--accent)_5%,transparent)] px-4 py-8 text-center transition-[border-color,background-color,box-shadow] hover:border-[color-mix(in_srgb,var(--accent)_55%,var(--border))] hover:bg-[color-mix(in_srgb,var(--accent)_10%,transparent)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color-mix(in_srgb,var(--accent)_45%,transparent)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--bg)]"
+          className="group flex min-h-[14rem] flex-col items-center justify-center gap-3 rounded-[var(--radius-lg)] border-2 border-dashed border-[color-mix(in_srgb,var(--muted)_38%,var(--border))] bg-[color-mix(in_srgb,var(--accent)_5%,transparent)] px-4 py-8 text-center transition-[border-color,background-color,box-shadow] hover:border-[color-mix(in_srgb,var(--accent)_55%,var(--border))] hover:bg-[color-mix(in_srgb,var(--accent)_10%,transparent)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color-mix(in_srgb,var(--accent)_45%,transparent)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--bg)]"
         >
           <span
             className="flex h-12 w-12 items-center justify-center rounded-full border border-[color-mix(in_srgb,var(--accent)_35%,var(--border))] bg-[color-mix(in_srgb,var(--accent)_14%,var(--surface))] text-[var(--accent)] transition-transform group-hover:scale-105"
@@ -322,67 +322,85 @@ export default function ContentPostsPage() {
           <span className="max-w-[15rem] text-xs leading-snug text-[var(--muted)]">Asistente: IA desde un tema o texto manual en varios pasos.</span>
         </button>
 
-        {posts.map((p) => (
-          <article key={p.id} className="card flex min-h-[11rem] flex-col overflow-hidden shadow-[var(--shadow-sm)]">
-            <div className="flex items-start justify-between gap-2 border-b border-[var(--border)] px-4 py-3">
-              <div className="min-w-0 flex-1">
-                <p className="truncate text-xs text-[var(--muted)]">
-                  {accountById[p.account_id]?.li_display_name ?? `Cuenta ${p.account_id.slice(0, 8)}`}
+        {posts.map((p) => {
+          const account = accountById[p.account_id];
+          const name = account?.li_display_name ?? `Cuenta ${p.account_id.slice(0, 8)}`;
+          const photo = account?.li_photo_url;
+          const headline = account?.li_headline;
+          return (
+            <article key={p.id} className="card flex flex-col overflow-hidden shadow-[var(--shadow-sm)]">
+              {/* Header estilo LinkedIn */}
+              <div className="flex items-start gap-3 px-4 pt-4">
+                {/* Avatar */}
+                <div className="relative shrink-0">
+                  {photo ? (
+                    <img src={photo} alt={name} className="h-11 w-11 rounded-full object-cover ring-1 ring-[var(--border)]" />
+                  ) : (
+                    <div className="flex h-11 w-11 items-center justify-center rounded-full bg-[color-mix(in_srgb,var(--accent)_18%,var(--surface))] text-base font-bold text-[var(--accent)] ring-1 ring-[var(--border)]">
+                      {name.charAt(0).toUpperCase()}
+                    </div>
+                  )}
+                </div>
+                {/* Nombre + subtítulo */}
+                <div className="min-w-0 flex-1">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="truncate text-sm font-semibold text-[var(--text)]">{name}</span>
+                    {statusBadge(p.status)}
+                  </div>
+                  {headline && <p className="truncate text-[11px] text-[var(--muted)]">{headline}</p>}
+                  {p.scheduled_time && (
+                    <p className="text-[11px] text-[var(--muted)]">
+                      Programado: {new Date(p.scheduled_time).toLocaleString("es")}
+                    </p>
+                  )}
+                </div>
+              </div>
+
+              {/* Texto del post */}
+              <div className="px-4 pt-3">
+                <p className="whitespace-pre-line text-sm leading-relaxed text-[var(--text)] line-clamp-[8]">
+                  {p.content}
                 </p>
               </div>
-              {statusBadge(p.status)}
-            </div>
-            <div className="flex flex-1 flex-col gap-2 card-pad pt-3">
-              <p className="line-clamp-4 flex-1 text-sm leading-relaxed text-[var(--text)]">{p.content}</p>
-              {hasImage(p) && (
-                <span className="inline-flex w-fit items-center gap-1 rounded-md border border-[var(--border)] px-2 py-0.5 text-[11px] text-[var(--muted)]">
-                  <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2} aria-hidden>
-                    <path
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                      d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"
-                    />
-                  </svg>
-                  Imagen
-                </span>
+
+              {/* Imagen al estilo LinkedIn (ancho completo) */}
+              {hasImage(p) && p.image_url && (
+                <div className="mt-3 overflow-hidden border-y border-[var(--border)]">
+                  <img
+                    src={p.image_url}
+                    alt="Imagen del post"
+                    className="w-full object-cover"
+                    style={{ maxHeight: "320px" }}
+                    onError={(e) => { (e.currentTarget as HTMLImageElement).style.display = "none"; }}
+                  />
+                </div>
               )}
-              {p.scheduled_time && (
-                <p className="text-xs text-[var(--muted)]">
-                  Programado: {new Date(p.scheduled_time).toLocaleString("es")}
-                </p>
-              )}
-              <div className="mt-auto flex flex-wrap gap-2 border-t border-[var(--border)] pt-3">
+
+              {/* Acciones */}
+              <div className="mt-auto flex flex-wrap gap-2 px-4 py-3 pt-3">
                 {p.linkedin_activity_url && (
-                  <a
-                    href={p.linkedin_activity_url}
-                    className="btn-secondary min-h-9 text-sm"
-                    target="_blank"
-                    rel="noreferrer"
-                  >
-                    Ver en LinkedIn
+                  <a href={p.linkedin_activity_url} className="btn-secondary min-h-8 text-xs" target="_blank" rel="noreferrer">
+                    Ver en LinkedIn ↗
                   </a>
                 )}
                 {p.status === "draft" && (
                   <>
-                    <button type="button" className="btn-secondary min-h-9 text-sm" onClick={() => setScheduleId(p.id)}>
+                    <button type="button" className="btn-secondary min-h-8 text-xs" onClick={() => setScheduleId(p.id)}>
                       Programar
                     </button>
                     <button
                       type="button"
-                      className="btn-secondary min-h-9 text-sm"
-                      onClick={() => {
-                        setEditId(p.id);
-                        setEditContent(p.content);
-                      }}
+                      className="btn-secondary min-h-8 text-xs"
+                      onClick={() => { setEditId(p.id); setEditContent(p.content); }}
                     >
                       Editar
                     </button>
                   </>
                 )}
               </div>
-            </div>
-          </article>
-        ))}
+            </article>
+          );
+        })}
       </div>
 
       {posts.length === 0 && (

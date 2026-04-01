@@ -25,6 +25,8 @@ export type KeywordRule = {
 export type ContentAccount = {
   id: string;
   li_display_name: string | null;
+  li_photo_url?: string | null;
+  li_headline?: string | null;
   connection_status?: string;
 };
 
