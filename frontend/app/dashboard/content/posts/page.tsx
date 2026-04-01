@@ -48,6 +48,7 @@ export default function ContentPostsPage() {
   const [manualAccount, setManualAccount] = useState("");
   const [manualContent, setManualContent] = useState("");
 
+  const [publishingNow, setPublishingNow] = useState<string | null>(null);
   const [scheduleId, setScheduleId] = useState<string | null>(null);
   const [scheduleAt, setScheduleAt] = useState("");
   const [editId, setEditId] = useState<string | null>(null);
@@ -119,6 +120,20 @@ export default function ContentPostsPage() {
     } catch (e) { setWizardError(formatApiError(e)); }
   }
 
+  async function publishNow(id: string) {
+    setPublishingNow(id);
+    try {
+      if (!(await getValidAccessToken())) return;
+      await api(`/posts/${id}/schedule`, {
+        method: "POST",
+        body: JSON.stringify({ scheduled_time: new Date().toISOString() }),
+      });
+      await load();
+    } finally {
+      setPublishingNow(null);
+    }
+  }
+
   async function schedule() {
     if (!scheduleId || !scheduleAt) return;
     if (!(await getValidAccessToken())) return;
@@ -148,9 +163,17 @@ export default function ContentPostsPage() {
         Volver a Contenido
       </Link>
 
-      <header className="mb-6">
-        <h1 className="page-title mb-1">Posts</h1>
-        <p className="page-desc">Borradores, programados y publicaciones creadas desde la app.</p>
+      <header className="mb-6 flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h1 className="page-title mb-1">Posts</h1>
+          <p className="page-desc">Borradores, programados y publicaciones creadas desde la app.</p>
+        </div>
+        <Link
+          href="/dashboard/content/events"
+          className="btn-secondary min-h-9 text-sm"
+        >
+          Ver eventos de comentarios →
+        </Link>
       </header>
 
       {/* Grid de posts */}
@@ -230,6 +253,14 @@ export default function ContentPostsPage() {
                 )}
                 {p.status === "draft" && (
                   <>
+                    <button
+                      type="button"
+                      disabled={publishingNow === p.id}
+                      className="btn-primary min-h-8 text-xs disabled:opacity-50"
+                      onClick={() => void publishNow(p.id)}
+                    >
+                      {publishingNow === p.id ? "Encolando…" : "Publicar ahora"}
+                    </button>
                     <button type="button" className="btn-secondary min-h-8 text-xs" onClick={() => setScheduleId(p.id)}>
                       Programar
                     </button>

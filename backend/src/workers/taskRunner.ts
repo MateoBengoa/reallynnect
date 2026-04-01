@@ -2975,31 +2975,94 @@ export async function runOneTask(sb: SupabaseClient, redis: RedisClient, taskId:
                 postMatches(r, raw, href)
             );
             if (!rule) continue;
+
+            // Dedup: evitar responder dos veces al mismo post en el mismo día
+            const hrefUrnMatch = href.match(/feed\/update\/([^/?#]+)/i);
+            const tentativeConvId = hrefUrnMatch?.[1] ? `feed:${hrefUrnMatch[1].slice(0, 120)}` : null;
+            if (tentativeConvId) {
+              const { data: existingMsg } = await sb
+                .from("messages")
+                .select("id")
+                .eq("account_id", accountId)
+                .eq("conversation_id", tentativeConvId)
+                .maybeSingle();
+              if (existingMsg) continue;
+            }
+
             await aEl.click({ timeout: 8000 }).catch(() => {});
             await page.waitForLoadState("domcontentloaded", { timeout: 45000 }).catch(() => {});
-            await new Promise((r) => setTimeout(r, 1500));
+            await new Promise((r) => setTimeout(r, 1800));
+
             let reply = (rule.reply_template ?? "").replace(/\{name\}/gi, "there");
             if (rule.use_ai && process.env.GEMINI_API_KEY) {
               const ctx = await page.locator("main").innerText().catch(() => "");
               reply = await generateDmReply(String(rule.keyword), ctx.slice(0, 4000));
             }
             if (!reply.trim()) continue;
-            const box = page
-              .locator(
-                ".comments-comment-box__form-container [contenteditable='true'], div[role='textbox'][aria-label*='comment' i], .ql-editor"
-              )
-              .first();
-            if (!(await box.isVisible({ timeout: 8000 }).catch(() => false))) {
-              throw new Error("poll_comments_comment_box_missing");
+
+            // Activar el composer de comentarios si hay un trigger visible (placeholder)
+            const commentTriggerSel = [
+              '[data-placeholder*="comment" i]',
+              '[data-placeholder*="comentario" i]',
+              '[aria-placeholder*="comment" i]',
+              '[aria-placeholder*="comentario" i]',
+              '[placeholder*="comment" i]',
+            ].join(", ");
+            const triggerEl = page.locator(commentTriggerSel).first();
+            if (await triggerEl.isVisible({ timeout: 3000 }).catch(() => false)) {
+              await triggerEl.click({ timeout: 5000 }).catch(() => {});
+              await new Promise((r) => setTimeout(r, 700));
+            }
+
+            // Buscar el cuadro de texto (múltiples selectores para UI minificada de LinkedIn)
+            const boxSel = [
+              '[contenteditable][aria-label*="comment" i]',
+              '[contenteditable][aria-placeholder*="comment" i]',
+              '[contenteditable][aria-placeholder*="comentario" i]',
+              '[contenteditable][data-placeholder*="comment" i]',
+              '[contenteditable][data-placeholder*="comentario" i]',
+              '.comments-comment-box__form-container [contenteditable]',
+              '.comments-comment-texteditor [contenteditable]',
+              'div[role="textbox"]',
+            ].join(", ");
+            const box = page.locator(boxSel).first();
+            if (!(await box.isVisible({ timeout: 10000 }).catch(() => false))) {
+              await logInboundCommentEvent(sb, userId, accountId, rule.id, "error", {
+                step: "comment_box",
+                error: "comment_box_not_found",
+                post_url: page.url(),
+              });
+              continue;
             }
             await box.click({ timeout: 5000 }).catch(() => {});
+            await new Promise((r) => setTimeout(r, 400));
             await box.fill(reply.slice(0, 3000));
-            await page.keyboard.press("Enter").catch(() => {});
-            await page
-              .getByRole("button", { name: /post|publicar|enviar comentario|comment/i })
-              .first()
-              .click({ timeout: 6000 })
-              .catch(() => {});
+            await new Promise((r) => setTimeout(r, 600));
+
+            // Enviar el comentario — probamos varios selectores antes del fallback por role
+            const submitSelectors = [
+              'button[type="submit"]',
+              'button[aria-label*="Post comment" i]',
+              'button[aria-label*="Publicar comentario" i]',
+              'button[aria-label*="Publicar" i]',
+              '.comments-comment-box__submit-button',
+            ];
+            let commentSubmitted = false;
+            for (const sel of submitSelectors) {
+              const btn = page.locator(sel).first();
+              if (await btn.isVisible({ timeout: 1500 }).catch(() => false)) {
+                await btn.click({ timeout: 6000 }).catch(() => {});
+                commentSubmitted = true;
+                break;
+              }
+            }
+            if (!commentSubmitted) {
+              await page
+                .getByRole("button", { name: /^post$|^publicar$|post comment|publicar comentario/i })
+                .first()
+                .click({ timeout: 6000 })
+                .catch(() => {});
+            }
             await new Promise((r) => setTimeout(r, 2500));
             const postUrl = page.url();
             const um = postUrl.match(/feed\/update\/([^/?#]+)/i) ?? postUrl.match(/ugcPost[^?#]+/i);
