@@ -76,7 +76,7 @@ export async function generateImageBytes(imagePrompt: string): Promise<Buffer | 
   if (!key) return null;
 
   // Usar el modelo dedicado de imagen; fallback a gemini-2.0-flash-preview-image-generation
-  const model = process.env.GEMINI_IMAGE_MODEL ?? "gemini-2.0-flash-preview-image-generation";
+  const model = process.env.GEMINI_IMAGE_MODEL ?? "gemini-3.1-flash-image-preview";
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${key}`;
 
   const body = {
