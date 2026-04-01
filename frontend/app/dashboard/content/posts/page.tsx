@@ -48,6 +48,7 @@ export default function ContentPostsPage() {
   const [manualAccount, setManualAccount] = useState("");
   const [manualContent, setManualContent] = useState("");
 
+  const [generatingAi, setGeneratingAi] = useState(false);
   const [publishingNow, setPublishingNow] = useState<string | null>(null);
   const [scheduleId, setScheduleId] = useState<string | null>(null);
   const [scheduleAt, setScheduleAt] = useState("");
@@ -98,6 +99,7 @@ export default function ContentPostsPage() {
     if (!topic.trim()) { setWizardError("Indica un tema para el post."); return; }
     setWizardError(null);
     if (!(await getValidAccessToken())) return;
+    setGeneratingAi(true);
     try {
       await api("/posts/generate", { method: "POST", body: JSON.stringify({ topic: topic.trim(), with_image: withImage }) });
       setWizardStep(3);
@@ -105,6 +107,8 @@ export default function ContentPostsPage() {
     } catch (e) {
       const msg = formatApiError(e);
       setWizardError(/gemini|503|GEMINI_API_KEY/i.test(msg) ? "IA no disponible: revisa GEMINI_API_KEY en el backend." : msg);
+    } finally {
+      setGeneratingAi(false);
     }
   }
 
@@ -373,7 +377,23 @@ export default function ContentPostsPage() {
                 <button type="button" className="btn-secondary min-h-10" onClick={() => { setWizardError(null); setWizardStep(1); setCreateMode(null); }}>Atrás</button>
               ) : <span />}
               <div className="ml-auto flex gap-2">
-                {wizardStep === 2 && createMode === "ai" && <button type="button" className="btn-primary min-h-10" onClick={() => void submitWizardAi()}>Generar borrador</button>}
+                {wizardStep === 2 && createMode === "ai" && (
+                  <button
+                    type="button"
+                    disabled={generatingAi}
+                    className="btn-primary min-h-10 min-w-[10rem] disabled:opacity-60"
+                    onClick={() => void submitWizardAi()}
+                  >
+                    {generatingAi ? (
+                      <span className="flex items-center gap-2">
+                        <svg className="h-4 w-4 animate-spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.5}>
+                          <path strokeLinecap="round" d="M12 2a10 10 0 0 1 10 10" />
+                        </svg>
+                        Generando…
+                      </span>
+                    ) : "Generar borrador"}
+                  </button>
+                )}
                 {wizardStep === 2 && createMode === "manual" && <button type="button" className="btn-primary min-h-10" onClick={() => void submitWizardManual()}>Guardar borrador</button>}
                 {wizardStep === 3 && <button type="button" className="btn-primary min-h-10" onClick={closeWizard}>Entendido</button>}
               </div>
