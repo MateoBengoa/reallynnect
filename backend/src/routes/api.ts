@@ -1273,13 +1273,19 @@ export async function registerApiRoutes(app: FastifyInstance) {
 
     let leadIds = body.lead_ids;
     if (!leadIds?.length) {
-      const { data: leads } = await sb.from("leads").select("id").eq("user_id", req.userId!);
-      leadIds = leads?.map((l) => l.id) ?? [];
+      // Solo leads ya enrollados en esta campaña (re-activar)
+      // Si no hay ninguno, el usuario debe pasar lead_ids explícitamente
+      const { data: enrolled } = await sb
+        .from("campaign_enrollments")
+        .select("lead_id")
+        .eq("campaign_id", id);
+      leadIds = (enrolled ?? []).map((r) => r.lead_id as string);
     }
+    if (!leadIds?.length) return reply.status(400).send({ error: "No hay leads en esta campaña. Añadí leads desde la sección Leads antes de iniciar." });
     if (camp.skip_contacted_other_campaigns) {
       leadIds = await filterLeadIdsSkipContactedOtherCampaigns(sb, id, leadIds);
     }
-    if (!leadIds.length) return reply.status(400).send({ error: "No leads" });
+    if (!leadIds.length) return reply.status(400).send({ error: "Todos los leads ya fueron contactados en otras campañas." });
 
     const { data: anyStep } = await sb
       .from("campaign_steps")

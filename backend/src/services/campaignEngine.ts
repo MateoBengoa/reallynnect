@@ -380,9 +380,17 @@ export async function createEnrollmentsAndSchedule(
     .limit(1)
     .maybeSingle();
   const firstDelayMs = (firstStep?.delay_hours ?? 0) * 3600 * 1000;
-  const nextRun = new Date(Date.now() + firstDelayMs).toISOString();
+
+  // Escalonar los leads: cada uno arranca 30 minutos después del anterior
+  // para nunca ejecutar dos leads en paralelo
+  const STAGGER_MS = 30 * 60 * 1000;
+  let leadIndex = 0;
 
   for (const leadId of leadIds) {
+    // nextRun escalonado: lead 0 → ahora+firstDelay, lead 1 → ahora+firstDelay+30min, etc.
+    const nextRun = new Date(Date.now() + firstDelayMs + leadIndex * STAGGER_MS).toISOString();
+    leadIndex++;
+
     const { data: existing } = await sb
       .from("campaign_enrollments")
       .select("id")
@@ -413,7 +421,7 @@ export async function createEnrollmentsAndSchedule(
 
       const enPatch: Record<string, unknown> = {
         status: "active",
-        next_run_at: new Date().toISOString(),
+        next_run_at: nextRun,
         crm_status: "in_campaign",
       };
       if (mustRestartFromBeginning) {
