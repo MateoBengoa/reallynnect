@@ -1,6 +1,6 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
-import { getQueueMode } from "../queues/redisClient.js";
+import { enqueueTaskDue, getQueueMode } from "../queues/redisClient.js";
 import { decryptSecret, encryptSecret, maskSecret } from "../lib/crypto.js";
 import {
   createEnrollmentsAndSchedule,
@@ -1640,6 +1640,21 @@ export async function registerApiRoutes(app: FastifyInstance) {
     const { data, error } = await qb;
     if (error) throw error;
     return { tasks: data ?? [] };
+  });
+
+  // Ejecutar tarea ahora (ignorar el scheduled_at)
+  app.post("/tasks/:id/skip-delay", async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const { data: accounts } = await sb.from("linkedin_accounts").select("id").eq("user_id", req.userId!);
+    const accountIds = (accounts ?? []).map((a) => a.id as string);
+    const { data: task } = await sb.from("tasks").select("id,status,account_id").eq("id", id).maybeSingle();
+    if (!task) return reply.status(404).send({ error: "not_found" });
+    if (!accountIds.includes(task.account_id as string)) return reply.status(403).send({ error: "forbidden" });
+    if (task.status !== "pending") return reply.status(400).send({ error: "Solo se pueden skipear tareas en estado pending" });
+    const now = new Date().toISOString();
+    await sb.from("tasks").update({ scheduled_at: now }).eq("id", id);
+    await enqueueTaskDue(redis, id, Date.now());
+    return { ok: true };
   });
 
   app.delete("/tasks/:id", async (req) => {

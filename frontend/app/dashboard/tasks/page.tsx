@@ -4,6 +4,22 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { getValidAccessToken } from "@/lib/supabase";
 import { api } from "@/lib/api";
 
+function isWaiting(t: Task): boolean {
+  return t.status === "pending" && new Date(t.scheduled_at).getTime() > Date.now() + 5_000;
+}
+
+function timeUntil(iso: string): string {
+  const diff = new Date(iso).getTime() - Date.now();
+  if (diff <= 0) return "ahora";
+  const s = Math.floor(diff / 1000);
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h ${m % 60}m`;
+  return `${Math.floor(h / 24)}d`;
+}
+
 type Task = {
   id: string;
   action: string;
@@ -59,6 +75,7 @@ export default function TasksPage() {
   const [autoRefresh, setAutoRefresh] = useState(true);
   const [expanded, setExpanded] = useState<string | null>(null);
   const [deleting, setDeleting] = useState<string | null>(null);
+  const [skipping, setSkipping] = useState<string | null>(null);
   const [bulkStatus, setBulkStatus] = useState<string | null>(null);
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
@@ -82,6 +99,16 @@ export default function TasksPage() {
       if (intervalRef.current) clearInterval(intervalRef.current);
     };
   }, [autoRefresh, load]);
+
+  const skipDelay = useCallback(async (id: string) => {
+    setSkipping(id);
+    try {
+      await api(`/tasks/${id}/skip-delay`, { method: "POST", body: JSON.stringify({}) });
+      await load();
+    } finally {
+      setSkipping(null);
+    }
+  }, [load]);
 
   const deleteOne = useCallback(async (id: string) => {
     setDeleting(id);
@@ -206,7 +233,7 @@ export default function TasksPage() {
               <th className="px-3 py-2 text-left font-semibold text-[var(--muted)]">Estado</th>
               <th className="px-3 py-2 text-left font-semibold text-[var(--muted)]">Cuenta</th>
               <th className="px-3 py-2 text-left font-semibold text-[var(--muted)]">Lead</th>
-              <th className="px-3 py-2 text-left font-semibold text-[var(--muted)]">Prog.</th>
+              <th className="px-3 py-2 text-left font-semibold text-[var(--muted)]">Espera</th>
               <th className="px-3 py-2 text-left font-semibold text-[var(--muted)]">Creada</th>
               <th className="px-3 py-2 text-left font-semibold text-[var(--muted)]">Int.</th>
               <th className="px-3 py-2 text-left font-semibold text-[var(--muted)]"></th>
@@ -228,12 +255,22 @@ export default function TasksPage() {
                 >
                   <td className="px-3 py-2 font-mono font-semibold text-[var(--text)]">{t.action}</td>
                   <td className="px-3 py-2">
-                    <StatusBadge status={t.status} />
+                    {isWaiting(t) ? (
+                      <span className="inline-flex items-center rounded border border-purple-400/30 bg-purple-400/15 px-1.5 py-0.5 font-mono text-[10px] font-semibold text-purple-400">
+                        esperando
+                      </span>
+                    ) : (
+                      <StatusBadge status={t.status} />
+                    )}
                   </td>
                   <td className="px-3 py-2 font-mono text-[var(--muted)]">{short(t.account_id)}</td>
                   <td className="px-3 py-2 font-mono text-[var(--muted)]">{short(t.lead_id)}</td>
                   <td className="px-3 py-2 font-mono text-[var(--muted)]" title={t.scheduled_at}>
-                    {relativeTime(t.scheduled_at)}
+                    {isWaiting(t) ? (
+                      <span className="text-purple-400">en {timeUntil(t.scheduled_at)}</span>
+                    ) : (
+                      relativeTime(t.scheduled_at)
+                    )}
                   </td>
                   <td className="px-3 py-2 font-mono text-[var(--muted)]" title={t.created_at}>
                     {relativeTime(t.created_at)}
@@ -241,6 +278,17 @@ export default function TasksPage() {
                   <td className="px-3 py-2 text-center text-[var(--muted)]">{t.attempts}</td>
                   <td className="px-3 py-2">
                     <div className="flex items-center gap-1">
+                      {isWaiting(t) && (
+                        <button
+                          type="button"
+                          disabled={skipping === t.id}
+                          onClick={() => void skipDelay(t.id)}
+                          className="rounded border border-purple-400/30 bg-purple-400/10 px-1.5 py-0.5 text-[10px] font-semibold text-purple-400 hover:bg-purple-400/20 disabled:opacity-40"
+                          title="Ejecutar ahora (ignorar espera)"
+                        >
+                          {skipping === t.id ? "…" : "▶ Skip"}
+                        </button>
+                      )}
                       <button
                         type="button"
                         onClick={() => setExpanded((prev) => (prev === t.id ? null : t.id))}
