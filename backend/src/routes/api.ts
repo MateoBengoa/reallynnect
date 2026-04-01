@@ -780,6 +780,7 @@ export async function registerApiRoutes(app: FastifyInstance) {
     "voice_note",
     "reply_comment",
     "inmail",
+    "wait",
   ]);
 
   const importJobBodySchema = z.object({
