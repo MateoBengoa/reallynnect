@@ -7,7 +7,7 @@ import {
   filterLeadIdsSkipContactedOtherCampaigns,
   scheduleEnrollmentStep,
 } from "../services/campaignEngine.js";
-import { extractSearchKeywords, fetchPexelsPhotoUrl, generateImageBytes, generateIllustrationBrief, generatePost } from "../services/gemini.js";
+import { generateImageBytes, generateIllustrationBrief, generatePost } from "../services/gemini.js";
 import { pickProxyForAccount } from "../services/proxyAssign.js";
 import { enqueueTask } from "../services/taskQueue.js";
 
@@ -1386,17 +1386,9 @@ export async function registerApiRoutes(app: FastifyInstance) {
     const { text } = await generatePost(body.topic);
     let image_url: string | null = null;
     if (body.with_image) {
-      // 1. Intentar con Pexels (foto de stock profesional)
-      if (process.env.PEXELS_API_KEY) {
-        const keywords = await extractSearchKeywords(body.topic, text);
-        image_url = await fetchPexelsPhotoUrl(keywords);
-      }
-      // 2. Fallback: Gemini imagen (si no hay Pexels key o sin resultados)
-      if (!image_url) {
-        const brief = await generateIllustrationBrief(body.topic, text);
-        const bytes = await generateImageBytes(brief);
-        if (bytes) image_url = `data:image/png;base64,${bytes.toString("base64")}`;
-      }
+      const brief = await generateIllustrationBrief(body.topic, text);
+      const bytes = await generateImageBytes(brief);
+      if (bytes) image_url = `data:image/png;base64,${bytes.toString("base64")}`;
     }
 
     const { data: accounts } = await sb.from("linkedin_accounts").select("id").eq("user_id", req.userId!).limit(1).maybeSingle();

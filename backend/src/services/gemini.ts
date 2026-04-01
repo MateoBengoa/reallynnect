@@ -48,90 +48,39 @@ Return JSON only (no markdown fences):
 }
 
 /**
- * Extrae 2-3 keywords en inglés para buscar foto en Pexels.
- */
-export async function extractSearchKeywords(topic: string, postText: string): Promise<string> {
-  const prompt = `LinkedIn post topic: "${topic}"
-Post excerpt: "${postText.slice(0, 300)}"
-
-Output 2-3 English search keywords to find a professional stock photo on Pexels.
-Rules: concrete nouns only, no adjectives like "professional" or "modern", relevant to the actual subject matter.
-Good examples: "team meeting", "data analysis", "remote work collaboration", "startup office", "product launch"
-Output ONLY the keywords comma-separated, nothing else.`;
-  return (await callGeminiText(prompt)).trim().replace(/['"]/g, "").slice(0, 80);
-}
-
-/**
- * Busca una foto de stock profesional en Pexels y devuelve la URL directa.
- * Requiere PEXELS_API_KEY en el entorno.
- */
-export async function fetchPexelsPhotoUrl(keywords: string): Promise<string | null> {
-  const key = process.env.PEXELS_API_KEY;
-  if (!key) return null;
-  try {
-    const q = encodeURIComponent(keywords);
-    const res = await fetch(
-      `https://api.pexels.com/v1/search?query=${q}&per_page=10&orientation=landscape&size=large`,
-      { headers: { Authorization: key } }
-    );
-    if (!res.ok) return null;
-    const data = await res.json() as {
-      photos?: Array<{ src: { large2x?: string; large?: string } }>;
-    };
-    const photos = data.photos ?? [];
-    if (!photos.length) return null;
-    // Elegir una al azar entre las primeras 5 para variedad
-    const pick = photos[Math.floor(Math.random() * Math.min(photos.length, 5))];
-    return pick?.src.large2x ?? pick?.src.large ?? null;
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Convierte un tema + texto de post en un brief de ilustración que evita
- * clichés de IA/tech usando metáforas cotidianas y colores cálidos.
+ * Genera un art direction brief en inglés para la imagen del post.
+ * Usa metáforas concretas y referencias de estilo (Airbnb/Stripe/Headspace)
+ * para que el modelo de imagen no caiga en el estilo sci-fi por defecto.
  */
 export async function generateIllustrationBrief(topic: string, postText: string): Promise<string> {
-  const prompt = `You are a creative director at a design studio. Your job: translate ANY business topic into a warm, everyday illustration concept — never show the technology itself.
+  const prompt = `You are an art director creating a LinkedIn post illustration brief.
 
 Topic: "${topic}"
 Post excerpt: "${postText.slice(0, 400)}"
 
-Write a 2-sentence illustration brief. Rules you MUST follow:
-1. Use ONLY everyday objects as metaphors: books, plants, hands, paths, doors, keys, bridges, seeds, lanterns, maps, conversations, seasons, kitchens, gardens, workshops — NEVER robots, brains, circuits, screens, chips, code, servers, or any tech hardware.
-2. Color palette: warm and inviting — oranges, earth tones, soft greens, cream, warm blues. NO dark backgrounds, NO neon, NO glows.
-3. Style: simple flat 2D like Duolingo or Mailchimp — bold shapes, solid fills, no gradients.
-4. Output ONLY the 2-sentence brief. No intro, no labels, no markdown.
+Write a single-paragraph image prompt (max 120 words) for an AI image generator. Requirements:
+- Choose ONE specific scene with 2-3 concrete objects that metaphorically represent the post's core idea
+- Objects must be from everyday life: people, furniture, plants, books, tools, food, architecture, nature — never AI hardware, chips, circuits, code, or glowing brains
+- Specify the exact art style: "flat vector illustration in the style of Airbnb or Stripe design system" OR "isometric illustration like Headspace app" OR "minimal editorial illustration like The Economist cover"
+- Name the exact 3 colors (hex or color names): warm and professional palette
+- Lighting: soft and even, no dramatic effects
+- End with: "White background. No text. No faces."
 
-Example output for "AI productivity tools":
-"A person in a cozy workshop organizing colorful building blocks into a neat tower, while a small owl perches nearby holding a checklist. Warm terracotta, cream, and forest green palette; flat geometric shapes on a light background."`;
+Output ONLY the prompt paragraph, nothing else.`;
 
-  const brief = await callGeminiText(prompt);
-  return brief.trim().slice(0, 600);
+  return (await callGeminiText(prompt)).trim().slice(0, 700);
 }
 
 export async function generateImageBytes(imagePrompt: string): Promise<Buffer | null> {
   const key = process.env.GEMINI_API_KEY;
   if (!key) return null;
 
-  const model = process.env.GEMINI_IMAGE_MODEL ?? DEFAULT_MODEL;
+  // Usar el modelo dedicado de imagen; fallback a gemini-2.0-flash-preview-image-generation
+  const model = process.env.GEMINI_IMAGE_MODEL ?? "gemini-2.0-flash-preview-image-generation";
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${key}`;
 
-  const fullPrompt = [
-    "Flat 2D illustration for LinkedIn. Scene:",
-    imagePrompt,
-    "Style: flat design, solid colors, bold simple shapes, like Duolingo or Mailchimp illustrations.",
-    "Background: solid light pastel or white.",
-    "NO: text, labels, numbers, gradients, glows, shadows, dark backgrounds, human faces, robots, circuit boards, neural networks, neon effects.",
-  ].join(" ");
-
   const body = {
-    contents: [
-      {
-        parts: [{ text: fullPrompt }],
-      },
-    ],
+    contents: [{ parts: [{ text: imagePrompt }] }],
     generationConfig: { responseModalities: ["TEXT", "IMAGE"] },
   };
 
