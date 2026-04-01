@@ -2052,10 +2052,14 @@ export async function runOneTask(sb: SupabaseClient, redis: RedisClient, taskId:
 
   // Acciones que no requieren navegador ni cuenta activa — resuelven inmediatamente.
   if (action === "wait" || action === "sync_lead_photo" || action === "batch_sync_lead_photos") {
-    await completeTask(sb, redis, taskId);
-    const enrollmentId = task.enrollment_id as string | undefined;
-    if (enrollmentId) {
-      await advanceEnrollmentAfterStep(sb, redis, enrollmentId);
+    try {
+      await completeTask(sb, redis, taskId);
+      const enrollmentId = task.enrollment_id as string | undefined;
+      if (enrollmentId) {
+        await advanceEnrollmentAfterStep(sb, redis, enrollmentId);
+      }
+    } catch (e) {
+      console.error(`[worker] ${action}(${taskId.slice(0, 8)}) advance failed:`, e instanceof Error ? e.message : e);
     }
     return;
   }
@@ -2204,7 +2208,12 @@ export async function runOneTask(sb: SupabaseClient, redis: RedisClient, taskId:
     const afterSuccess = async () => {
       await completeTask(sb, redis, taskId);
       if (enrollmentId) {
-        await advanceEnrollmentAfterStep(sb, redis, enrollmentId);
+        try {
+          await advanceEnrollmentAfterStep(sb, redis, enrollmentId);
+        } catch (advErr) {
+          // No propagamos — la tarea ya está completada; el enrollment se recuperará en el siguiente ciclo
+          console.error(`[worker] advanceEnrollmentAfterStep(${enrollmentId.slice(0, 8)}) falló:`, advErr instanceof Error ? advErr.message : advErr);
+        }
       }
     };
 
@@ -2303,7 +2312,7 @@ export async function runOneTask(sb: SupabaseClient, redis: RedisClient, taskId:
       let activityPid: string | null = null;
       try {
         const r = await scrapeLoggedInMemberActivityPosts(page, 80);
-        scraped = r.posts;
+        scraped = r.posts ?? [];
         activityPid = r.publicIdentifier;
       } catch (e) {
         console.error("[sync_linkedin_posts] scrape", e);
@@ -3378,10 +3387,15 @@ export async function runOneTask(sb: SupabaseClient, redis: RedisClient, taskId:
       if (account.proxy_id) await markProxyDegraded(sb, account.proxy_id as string);
     }
     if (traceCtl) {
-      await traceCtl.stopSaveFailure();
+      await traceCtl.stopSaveFailure().catch(() => {});
       traceCtl = null;
     }
-    await failTask(sb, redis, task, msg.slice(0, 500), browser?.page ?? null);
+    try {
+      await failTask(sb, redis, task, msg.slice(0, 500), browser?.page ?? null);
+    } catch (failErr) {
+      // failTask puede fallar si la DB está caída; no propagamos para que el finally siempre libere el slot
+      console.error(`[worker] failTask(${taskId.slice(0, 8)}) threw:`, failErr instanceof Error ? failErr.message : failErr);
+    }
   } finally {
     if (browser) {
       if (traceCtl) {
@@ -3468,6 +3482,13 @@ export async function processDueTasks(sb: SupabaseClient, redis: RedisClient): P
   }
 
   if (batch.length) {
-    await Promise.all(batch.map((taskId) => runOneTask(sb, redis, taskId)));
+    await Promise.all(
+      batch.map((taskId) =>
+        runOneTask(sb, redis, taskId).catch((e: unknown) => {
+          // Aísla el fallo de una tarea para que no cancele las demás del batch
+          console.error(`[worker] runOneTask(${taskId.slice(0, 8)}) uncaught:`, e instanceof Error ? e.message : e);
+        })
+      )
+    );
   }
 }

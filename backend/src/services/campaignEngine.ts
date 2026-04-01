@@ -282,7 +282,8 @@ export async function scheduleEnrollmentStep(
 
   if (e3 || !task) return false;
 
-  await enqueueTaskDue(redis, task.id, new Date(task.scheduled_at).getTime());
+  const scheduledMs = task.scheduled_at ? new Date(task.scheduled_at as string).getTime() : Date.now();
+  await enqueueTaskDue(redis, task.id as string, scheduledMs);
   return true;
 }
 
@@ -329,7 +330,10 @@ export async function advanceEnrollmentAfterStep(
     })
     .eq("id", enrollmentId);
 
-  await scheduleEnrollmentStep(sb, redis, enrollmentId);
+  const scheduled = await scheduleEnrollmentStep(sb, redis, enrollmentId);
+  if (!scheduled) {
+    console.warn(`[campaignEngine] scheduleEnrollmentStep returned false para enrollment ${enrollmentId} (step ${nextIdx}) — enrollment avanzado pero sin tarea pendiente.`);
+  }
 }
 
 /**

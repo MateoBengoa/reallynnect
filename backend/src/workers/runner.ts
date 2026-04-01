@@ -20,11 +20,20 @@ async function main() {
     process.env.PLAYWRIGHT_CHANNEL?.trim() || "(chromium embebido)"
   );
 
+  let consecutiveErrors = 0;
+
   const loop = async () => {
     try {
       await processDueTasks(sb, redis);
+      consecutiveErrors = 0;
     } catch (e) {
-      console.error("worker loop", e);
+      consecutiveErrors++;
+      const backoffMs = Math.min(60_000, INTERVAL_MS * 2 ** Math.min(consecutiveErrors - 1, 5));
+      console.error(`[worker] loop error #${consecutiveErrors} (backoff ${backoffMs}ms):`, e instanceof Error ? e.message : e);
+      if (consecutiveErrors >= 10) {
+        console.error("[worker] 10 errores consecutivos — posible problema con DB/Redis. Esperando backoff máximo.");
+      }
+      await new Promise((r) => setTimeout(r, backoffMs));
     }
   };
 
