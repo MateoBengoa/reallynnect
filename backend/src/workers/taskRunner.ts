@@ -2799,6 +2799,16 @@ export async function runOneTask(sb: SupabaseClient, redis: RedisClient, taskId:
           await fs.writeFile(tmp, Buffer.from(b64, "base64"));
           imagePath = tmp;
         }
+      } else if (post.image_url?.startsWith("http")) {
+        try {
+          const imgRes = await fetch(post.image_url);
+          if (imgRes.ok) {
+            const ext = post.image_url.includes(".png") ? "png" : "jpg";
+            const tmp = path.join(os.tmpdir(), `li-${postId}.${ext}`);
+            await fs.writeFile(tmp, Buffer.from(await imgRes.arrayBuffer()));
+            imagePath = tmp;
+          }
+        } catch { /* sin imagen */ }
       }
       const r = await publishPost(page, post.content, imagePath);
       if (imagePath) await fs.unlink(imagePath).catch(() => {});

@@ -48,6 +48,47 @@ Return JSON only (no markdown fences):
 }
 
 /**
+ * Extrae 2-3 keywords en inglés para buscar foto en Pexels.
+ */
+export async function extractSearchKeywords(topic: string, postText: string): Promise<string> {
+  const prompt = `LinkedIn post topic: "${topic}"
+Post excerpt: "${postText.slice(0, 300)}"
+
+Output 2-3 English search keywords to find a professional stock photo on Pexels.
+Rules: concrete nouns only, no adjectives like "professional" or "modern", relevant to the actual subject matter.
+Good examples: "team meeting", "data analysis", "remote work collaboration", "startup office", "product launch"
+Output ONLY the keywords comma-separated, nothing else.`;
+  return (await callGeminiText(prompt)).trim().replace(/['"]/g, "").slice(0, 80);
+}
+
+/**
+ * Busca una foto de stock profesional en Pexels y devuelve la URL directa.
+ * Requiere PEXELS_API_KEY en el entorno.
+ */
+export async function fetchPexelsPhotoUrl(keywords: string): Promise<string | null> {
+  const key = process.env.PEXELS_API_KEY;
+  if (!key) return null;
+  try {
+    const q = encodeURIComponent(keywords);
+    const res = await fetch(
+      `https://api.pexels.com/v1/search?query=${q}&per_page=10&orientation=landscape&size=large`,
+      { headers: { Authorization: key } }
+    );
+    if (!res.ok) return null;
+    const data = await res.json() as {
+      photos?: Array<{ src: { large2x?: string; large?: string } }>;
+    };
+    const photos = data.photos ?? [];
+    if (!photos.length) return null;
+    // Elegir una al azar entre las primeras 5 para variedad
+    const pick = photos[Math.floor(Math.random() * Math.min(photos.length, 5))];
+    return pick?.src.large2x ?? pick?.src.large ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Convierte un tema + texto de post en un brief de ilustración que evita
  * clichés de IA/tech usando metáforas cotidianas y colores cálidos.
  */
