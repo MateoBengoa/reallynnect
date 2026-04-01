@@ -7,7 +7,7 @@ import {
   filterLeadIdsSkipContactedOtherCampaigns,
   scheduleEnrollmentStep,
 } from "../services/campaignEngine.js";
-import { generateImageBytes, generatePost } from "../services/gemini.js";
+import { generateImageBytes, generateIllustrationBrief, generatePost } from "../services/gemini.js";
 import { pickProxyForAccount } from "../services/proxyAssign.js";
 import { enqueueTask } from "../services/taskQueue.js";
 
@@ -1383,10 +1383,12 @@ export async function registerApiRoutes(app: FastifyInstance) {
     const body = schema.parse(req.body);
     if (!process.env.GEMINI_API_KEY) return reply.status(503).send({ error: "GEMINI_API_KEY not configured" });
 
-    const { text, imageDescription } = await generatePost(body.topic);
+    const { text } = await generatePost(body.topic);
     let image_url: string | null = null;
-    if (body.with_image && imageDescription) {
-      const bytes = await generateImageBytes(imageDescription);
+    if (body.with_image) {
+      // Traducir el tema a una metáfora visual cálida antes de generar la imagen
+      const brief = await generateIllustrationBrief(body.topic, text);
+      const bytes = await generateImageBytes(brief);
       if (bytes) {
         image_url = `data:image/png;base64,${bytes.toString("base64")}`;
       }

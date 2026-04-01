@@ -47,6 +47,29 @@ Return JSON only (no markdown fences):
   }
 }
 
+/**
+ * Convierte un tema + texto de post en un brief de ilustración que evita
+ * clichés de IA/tech usando metáforas cotidianas y colores cálidos.
+ */
+export async function generateIllustrationBrief(topic: string, postText: string): Promise<string> {
+  const prompt = `You are a creative director at a design studio. Your job: translate ANY business topic into a warm, everyday illustration concept — never show the technology itself.
+
+Topic: "${topic}"
+Post excerpt: "${postText.slice(0, 400)}"
+
+Write a 2-sentence illustration brief. Rules you MUST follow:
+1. Use ONLY everyday objects as metaphors: books, plants, hands, paths, doors, keys, bridges, seeds, lanterns, maps, conversations, seasons, kitchens, gardens, workshops — NEVER robots, brains, circuits, screens, chips, code, servers, or any tech hardware.
+2. Color palette: warm and inviting — oranges, earth tones, soft greens, cream, warm blues. NO dark backgrounds, NO neon, NO glows.
+3. Style: simple flat 2D like Duolingo or Mailchimp — bold shapes, solid fills, no gradients.
+4. Output ONLY the 2-sentence brief. No intro, no labels, no markdown.
+
+Example output for "AI productivity tools":
+"A person in a cozy workshop organizing colorful building blocks into a neat tower, while a small owl perches nearby holding a checklist. Warm terracotta, cream, and forest green palette; flat geometric shapes on a light background."`;
+
+  const brief = await callGeminiText(prompt);
+  return brief.trim().slice(0, 600);
+}
+
 export async function generateImageBytes(imagePrompt: string): Promise<Buffer | null> {
   const key = process.env.GEMINI_API_KEY;
   if (!key) return null;
@@ -55,16 +78,12 @@ export async function generateImageBytes(imagePrompt: string): Promise<Buffer | 
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${key}`;
 
   const fullPrompt = [
-    "Create a flat-design LinkedIn illustration. Follow these instructions exactly:",
+    "Flat 2D illustration for LinkedIn. Scene:",
     imagePrompt,
-    "STRICT RULES — violating any disqualifies the image:",
-    "- Style: flat 2D illustration, solid colors only, NO gradients, NO glows, NO shadows",
-    "- FORBIDDEN elements: glowing brains, neural networks, circuit boards, neon lights, abstract energy orbs, dark sci-fi backgrounds, chip silhouettes, data streams",
-    "- NO text, letters, numbers, labels, or watermarks anywhere in the image",
-    "- NO human faces",
-    "- Background: solid light color (white, off-white, or a single pastel tone)",
-    "- Mood: clean, professional, optimistic, modern",
-  ].join("\n");
+    "Style: flat design, solid colors, bold simple shapes, like Duolingo or Mailchimp illustrations.",
+    "Background: solid light pastel or white.",
+    "NO: text, labels, numbers, gradients, glows, shadows, dark backgrounds, human faces, robots, circuit boards, neural networks, neon effects.",
+  ].join(" ");
 
   const body = {
     contents: [
