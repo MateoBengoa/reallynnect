@@ -54,7 +54,7 @@ export default function DashboardHome() {
       try {
         const r = await api<CrmSummary>("/crm-summary");
         setData(r);
-      } catch { /* ignore */ }
+      } catch (e) { console.error("[crm-summary]", e); }
     })();
   }, []);
 
@@ -73,7 +73,7 @@ export default function DashboardHome() {
         </div>
         <div className="kpi-card">
           <p className="text-xs text-[var(--muted)]">En pipeline</p>
-          <p className="mt-1 text-3xl font-semibold tracking-tight">{totalPipeline || "—"}</p>
+          <p className="mt-1 text-3xl font-semibold tracking-tight">{data ? totalPipeline : "—"}</p>
         </div>
         <div className="kpi-card">
           <p className="text-xs text-[var(--muted)]">Campañas activas</p>

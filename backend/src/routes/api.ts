@@ -1551,25 +1551,25 @@ export async function registerApiRoutes(app: FastifyInstance) {
     const pipeline: Record<string, number> = {
       not_contacted: 0, in_campaign: 0, contacted: 0, replied: 0, not_accepted: 0, blacklist: 0,
     };
-    type EnrollLeadRow = { crm_status: string; lead_id: string; leads: { id: string; name: string | null; photo_url: string | null; title: string | null; company: string | null } | null };
-    let enrollments: EnrollLeadRow[] = [];
+    const enrollLeadRows: Array<{ crm_status: string; lead_id: string; leads: { id: string; name: string | null; photo_url: string | null; title: string | null; company: string | null } | null }> = [];
 
     if (campaignIds.length) {
       const { data: enRows } = await sb
         .from("campaign_enrollments")
         .select("crm_status, lead_id, leads!lead_id(id, name, photo_url, title, company)")
         .in("campaign_id", campaignIds);
-      enrollments = (enRows ?? []).map((e) => ({
-        crm_status: String(e.crm_status ?? ""),
-        lead_id: String(e.lead_id ?? ""),
-        leads: (e.leads as unknown) as EnrollLeadRow["leads"],
-      }));
-      for (const e of enrollments) {
-        if (e.crm_status in pipeline) pipeline[e.crm_status]++;
+      for (const e of enRows ?? []) {
+        enrollLeadRows.push({
+          crm_status: String(e.crm_status ?? ""),
+          lead_id: String(e.lead_id ?? ""),
+          leads: (e.leads as unknown) as (typeof enrollLeadRows)[0]["leads"],
+        });
+        const s = String(e.crm_status ?? "");
+        if (s in pipeline) pipeline[s]++;
       }
     }
 
-    const recentReplied = enrollments
+    const recentReplied = enrollLeadRows
       .filter((e) => e.crm_status === "replied")
       .slice(0, 8)
       .map((e) => ({
