@@ -8,10 +8,11 @@ import { supabase } from "@/lib/supabase";
 
 const nav = [
   { href: "/dashboard", label: "Inicio", match: (p: string) => p === "/dashboard" },
-  { href: "/dashboard/content", label: "Contenido", match: (p: string) => p.startsWith("/dashboard/content") },
   { href: "/dashboard/campaigns", label: "Campañas", match: (p: string) => p.startsWith("/dashboard/campaigns") },
   { href: "/dashboard/leads", label: "Leads", match: (p: string) => p.startsWith("/dashboard/leads") },
   { href: "/dashboard/inbox", label: "Inbox", match: (p: string) => p.startsWith("/dashboard/inbox") },
+  { href: "/dashboard/content", label: "Contenido", match: (p: string) => p.startsWith("/dashboard/content") },
+  { href: "/dashboard/accounts", label: "Cuentas", match: (p: string) => p.startsWith("/dashboard/accounts") },
   { href: "/dashboard/tasks", label: "Tareas", match: (p: string) => p.startsWith("/dashboard/tasks") },
 ] as const;
 

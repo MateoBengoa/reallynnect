@@ -21,6 +21,13 @@ type Account = {
   proxy_id: string | null;
 };
 
+type ProxyDraft = {
+  host: string;
+  port: string;
+  username: string;
+  password: string;
+};
+
 function verificationLabel(a: Account): string {
   if (a.connection_status === "pending") {
     return "Verificación en curso: el worker está comprobando la cookie en LinkedIn…";
@@ -56,6 +63,8 @@ export default function AccountsPage() {
   const [msg, setMsg] = useState<string | null>(null);
   const [syncingId, setSyncingId] = useState<string | null>(null);
   const [budgetDrafts, setBudgetDrafts] = useState<Record<string, string>>({});
+  const [proxyDrafts, setProxyDrafts] = useState<Record<string, ProxyDraft>>({});
+  const [proxyOpen, setProxyOpen] = useState<string | null>(null);
   const syncBaseline = useRef<{ at: string | null; name: string | null } | null>(null);
 
   const load = useCallback(async () => {
@@ -159,6 +168,47 @@ export default function AccountsPage() {
     if (!t) return null;
     const n = parseInt(t, 10);
     return Number.isFinite(n) && n > 0 ? n : null;
+  }
+
+  async function saveOwnProxy(accountId: string) {
+    const d = proxyDrafts[accountId];
+    if (!d?.host || !d?.port) return;
+    setMsg(null);
+    if (!(await getValidAccessToken())) return;
+    try {
+      // Crear proxy nuevo y asignarlo a la cuenta
+      const proxy = await api<{ id: string }>("/proxies", {
+        method: "POST",
+        body: JSON.stringify({
+          host: d.host.trim(),
+          port: parseInt(d.port, 10),
+          username: d.username.trim() || undefined,
+          password: d.password.trim() || undefined,
+        }),
+      });
+      await api(`/linkedin-accounts/${accountId}`, {
+        method: "PATCH",
+        body: JSON.stringify({ proxy_id: proxy.id }),
+      });
+      setMsg("Proxy propio guardado y asignado.");
+      setProxyOpen(null);
+      await load();
+    } catch (e: unknown) {
+      setMsg(e instanceof Error ? e.message : "Error al guardar proxy");
+    }
+  }
+
+  async function removeProxy(accountId: string) {
+    if (!(await getValidAccessToken())) return;
+    try {
+      await api(`/linkedin-accounts/${accountId}`, {
+        method: "PATCH",
+        body: JSON.stringify({ proxy_id: null }),
+      });
+      await load();
+    } catch {
+      /* ignore */
+    }
   }
 
   async function saveBudgets(accountId: string) {
@@ -294,16 +344,69 @@ export default function AccountsPage() {
                 {a.connection_status}
                 {a.connection_status === "pending" ? " · …" : ""} · {a.softban_status}
               </span>
-              <span
-                className={`rounded-[var(--radius-sm)] px-2 py-0.5 text-xs ${
-                  a.proxy_id
-                    ? "bg-green-500/10 text-green-400"
-                    : "bg-amber-500/10 text-amber-400"
-                }`}
-                title={a.proxy_id ? `Proxy: ${a.proxy_id}` : "Sin proxy asignado"}
-              >
-                {a.proxy_id ? "proxy ✓" : "sin proxy"}
-              </span>
+              {a.proxy_id ? (
+                <div className="flex items-center gap-1">
+                  <span className="rounded-[var(--radius-sm)] bg-green-500/10 px-2 py-0.5 text-xs text-green-400">
+                    proxy ✓
+                  </span>
+                  <button
+                    type="button"
+                    className="text-[10px] text-[var(--muted)] hover:text-red-400"
+                    onClick={() => removeProxy(a.id)}
+                    title="Quitar proxy (se usará el de la app)"
+                  >
+                    ×
+                  </button>
+                </div>
+              ) : (
+                <button
+                  type="button"
+                  className="rounded-[var(--radius-sm)] bg-amber-500/10 px-2 py-0.5 text-xs text-amber-400 hover:bg-amber-500/20"
+                  onClick={() => setProxyOpen(proxyOpen === a.id ? null : a.id)}
+                >
+                  {proxyOpen === a.id ? "cancelar" : "proxy de app ·  usar el mío"}
+                </button>
+              )}
+              {proxyOpen === a.id && (
+                <div className="w-full rounded-xl border border-[var(--border)] bg-[color-mix(in_srgb,var(--text)_3%,var(--surface))] p-3 text-xs">
+                  <p className="mb-2 text-[var(--muted)]">Proxy propio (deja vacío usuario/contraseña si no tiene)</p>
+                  <div className="grid grid-cols-2 gap-2">
+                    <input
+                      className="input-field col-span-2 py-1.5 text-xs"
+                      placeholder="Host (ej: 1.2.3.4 o proxy.host.com)"
+                      value={proxyDrafts[a.id]?.host ?? ""}
+                      onChange={(e) => setProxyDrafts((d) => ({ ...d, [a.id]: { ...d[a.id] ?? { host:"",port:"",username:"",password:"" }, host: e.target.value } }))}
+                    />
+                    <input
+                      className="input-field py-1.5 text-xs"
+                      placeholder="Puerto"
+                      inputMode="numeric"
+                      value={proxyDrafts[a.id]?.port ?? ""}
+                      onChange={(e) => setProxyDrafts((d) => ({ ...d, [a.id]: { ...d[a.id] ?? { host:"",port:"",username:"",password:"" }, port: e.target.value } }))}
+                    />
+                    <input
+                      className="input-field py-1.5 text-xs"
+                      placeholder="Usuario (opcional)"
+                      value={proxyDrafts[a.id]?.username ?? ""}
+                      onChange={(e) => setProxyDrafts((d) => ({ ...d, [a.id]: { ...d[a.id] ?? { host:"",port:"",username:"",password:"" }, username: e.target.value } }))}
+                    />
+                    <input
+                      type="password"
+                      className="input-field col-span-2 py-1.5 text-xs"
+                      placeholder="Contraseña (opcional)"
+                      value={proxyDrafts[a.id]?.password ?? ""}
+                      onChange={(e) => setProxyDrafts((d) => ({ ...d, [a.id]: { ...d[a.id] ?? { host:"",port:"",username:"",password:"" }, password: e.target.value } }))}
+                    />
+                  </div>
+                  <button
+                    type="button"
+                    className="btn-primary mt-2 py-1.5 text-xs"
+                    onClick={() => saveOwnProxy(a.id)}
+                  >
+                    Guardar proxy propio
+                  </button>
+                </div>
+              )}
               <button type="button" className="btn-danger w-full sm:w-auto" onClick={() => remove(a.id)}>
                 Eliminar
               </button>
