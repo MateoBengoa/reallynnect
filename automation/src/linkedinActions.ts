@@ -862,6 +862,25 @@ async function clickConnectRobust(page: Page): Promise<boolean> {
   if (await tryInTopCard(profileTopActionBar(page))) return true;
   if (await tryInTopCard(profileTopActionBarFallback(page))) return true;
 
+  // LinkedIn minifies class names — fallback: search the entire main without relying on class selectors.
+  const mainLoc = page.locator("main");
+  if (
+    await tryClickNthVisible(
+      mainLoc
+        .locator('a[href*="custom-invite"]')
+        .filter({ hasNot: page.locator('[aria-label*="pendiente" i], [aria-label*="pending" i], [aria-label*="retirar" i], [aria-label*="withdraw" i]') })
+    )
+  ) return true;
+  if (
+    await tryClickNthVisible(
+      mainLoc
+        .locator(
+          'button[aria-label*="conectar" i], button[aria-label*="connect" i], button[aria-label*="invita" i]'
+        )
+        .filter({ hasNot: page.locator('[aria-label*="pendiente" i], [aria-label*="pending" i], [aria-label*="retirar" i], [aria-label*="withdraw" i]') })
+    )
+  ) return true;
+
   const panels = page.locator(
     '.artdeco-dropdown__content--is-open, [class*="dropdown__content--is-open"], .artdeco-dropdown__content-inner'
   );
@@ -896,6 +915,11 @@ async function clickConnectRobust(page: Page): Promise<boolean> {
     )) {
       scopes.push(op);
     }
+    // LinkedIn minifies class names — if no named containers found, search all of main.
+    if (scopes.length === 0) {
+      const m = document.querySelector("main");
+      if (m) scopes.push(m);
+    }
     if (scopes.length === 0) return false;
 
     for (const scope of scopes) {
@@ -904,6 +928,8 @@ async function clickConnectRobust(page: Page): Promise<boolean> {
       )) {
         const el = a as HTMLElement;
         if (el.offsetParent === null) continue;
+        const hay = (el.getAttribute("aria-label") || "").toLowerCase();
+        if (/pendiente|pending|requested|retirar|withdraw/.test(hay)) continue;
         el.scrollIntoView({ block: "nearest", inline: "nearest" });
         el.click();
         return true;
@@ -912,8 +938,20 @@ async function clickConnectRobust(page: Page): Promise<boolean> {
         const el = svg.closest("a") as HTMLAnchorElement | null;
         if (!el || el.offsetParent === null) continue;
         const hay = `${el.getAttribute("aria-label") || ""} ${el.textContent || ""}`.toLowerCase();
-        if (/pendiente|pending|requested/.test(hay)) continue;
+        if (/pendiente|pending|requested|retirar|withdraw/.test(hay)) continue;
         if (/conectar|connect|invita|invite/.test(hay) || hrefHasInvite(el)) {
+          el.scrollIntoView({ block: "nearest", inline: "nearest" });
+          el.click();
+          return true;
+        }
+      }
+      // Button-based connect (LinkedIn minified UI: <button aria-label="Invita a X a conectar">)
+      for (const btn of scope.querySelectorAll("button")) {
+        const el = btn as HTMLElement;
+        if (el.offsetParent === null) continue;
+        const al = (el.getAttribute("aria-label") || "").toLowerCase();
+        if (/pendiente|pending|requested|retirar|withdraw/.test(al)) continue;
+        if (/conectar|connect|invita.*conectar|invite.*connect/.test(al)) {
           el.scrollIntoView({ block: "nearest", inline: "nearest" });
           el.click();
           return true;
