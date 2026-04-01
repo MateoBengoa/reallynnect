@@ -33,7 +33,7 @@ Tone: thought leadership, educational, engaging.
 Return JSON only (no markdown fences):
 {
   "post": "the full post text",
-  "imageDescription": "A detailed visual scene for a LinkedIn illustration DIRECTLY inspired by the post content and key ideas. Describe: specific objects or metaphors that appear in the post, the color palette (professional, 2-3 colors), style (flat design, minimal, clean lines), mood and composition. The scene must visually represent the core message, NOT a generic business image. No people faces, no text or logos in the image."
+  "imageDescription": "Design a UNIQUE flat-design illustration for this specific post. Rules: (1) Base it on a CONCRETE METAPHOR or specific object directly from the post topic — NOT generic tech imagery. (2) FORBIDDEN: glowing brains, neural networks, circuit boards, blue neon, abstract orbs, generic robots, chip silhouettes, data streams. (3) Describe a simple scene with 2-3 bold flat colors, clean shapes, no gradients. (4) Example for a post about Claude AI: a friendly speech bubble made of building blocks with an 'A' and a 'C' interlocking, warm orange and white palette, minimal background. (5) Include: main object, secondary element, color palette (name the exact colors), composition (centered/left-heavy/etc), and overall mood."
 }`;
   const raw = await callGeminiText(prompt);
   try {
@@ -55,9 +55,15 @@ export async function generateImageBytes(imagePrompt: string): Promise<Buffer | 
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${key}`;
 
   const fullPrompt = [
-    "Create a professional LinkedIn post illustration with these exact specifications:",
+    "Create a flat-design LinkedIn illustration. Follow these instructions exactly:",
     imagePrompt,
-    "Additional requirements: flat design style, clean minimal composition, no human faces, absolutely no text or watermarks, suitable for a B2B professional audience, high contrast, print-quality.",
+    "STRICT RULES — violating any disqualifies the image:",
+    "- Style: flat 2D illustration, solid colors only, NO gradients, NO glows, NO shadows",
+    "- FORBIDDEN elements: glowing brains, neural networks, circuit boards, neon lights, abstract energy orbs, dark sci-fi backgrounds, chip silhouettes, data streams",
+    "- NO text, letters, numbers, labels, or watermarks anywhere in the image",
+    "- NO human faces",
+    "- Background: solid light color (white, off-white, or a single pastel tone)",
+    "- Mood: clean, professional, optimistic, modern",
   ].join("\n");
 
   const body = {
