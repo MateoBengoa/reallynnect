@@ -8,7 +8,7 @@ import {
   scheduleEnrollmentStep,
 } from "../services/campaignEngine.js";
 import { generateImageBytes, generatePost } from "../services/gemini.js";
-import { autoAssignProxiesToAccounts, pickProxyForAccount, syncWebshareProxies } from "../services/proxyAssign.js";
+import { pickProxyForAccount } from "../services/proxyAssign.js";
 import { enqueueTask } from "../services/taskQueue.js";
 
 const proxyBody = z.object({
@@ -251,21 +251,7 @@ export async function registerApiRoutes(app: FastifyInstance) {
     return { profile: data };
   });
 
-  app.get("/proxies", async (req) => {
-    const { data, error } = await sb
-      .from("proxies")
-      .select("id,host,port,username,status,last_used,created_at,account_id,webshare_proxy_id")
-      .eq("user_id", req.userId!)
-      .order("created_at", { ascending: true });
-    if (error) throw error;
-    return {
-      proxies: (data ?? []).map((p) => ({
-        ...p,
-        username: p.username ? maskSecret(p.username) : null,
-      })),
-    };
-  });
-
+  // Crea un proxy propio del usuario (para usar en lugar del de la app)
   app.post("/proxies", async (req, reply) => {
     const body = proxyBody.parse(req.body);
     const row = {
@@ -281,81 +267,16 @@ export async function registerApiRoutes(app: FastifyInstance) {
     return { id: data!.id };
   });
 
+  // Elimina un proxy propio del usuario (solo los suyos, no los de la app)
   app.delete("/proxies/:id", async (req, reply) => {
     const { id } = req.params as { id: string };
-    // Verificar propiedad antes de borrar
     const { data: proxy } = await sb.from("proxies").select("id,account_id").eq("id", id).eq("user_id", req.userId!).maybeSingle();
     if (!proxy) return reply.status(404).send({ error: "not_found" });
-    // Desasignar de la cuenta si estaba asignado
     if (proxy.account_id) {
       await sb.from("linkedin_accounts").update({ proxy_id: null }).eq("id", proxy.account_id as string);
     }
     await sb.from("proxies").delete().eq("id", id);
     return { ok: true };
-  });
-
-  app.post("/proxies/sync-webshare", async (req, reply) => {
-    const body = (req.body ?? {}) as { api_key?: string };
-    let apiKey = body.api_key?.trim() ?? "";
-
-    // Si no se pasó key, usar la guardada en el perfil
-    if (!apiKey) {
-      const { data: prof } = await sb.from("profiles").select("webshare_api_key_encrypted").eq("id", req.userId!).single();
-      if (!prof?.webshare_api_key_encrypted) return reply.status(400).send({ error: "Necesitas ingresar tu API key de Webshare.io." });
-      try { apiKey = decryptSecret(prof.webshare_api_key_encrypted); } catch { apiKey = prof.webshare_api_key_encrypted; }
-    }
-
-    if (apiKey.length < 10) return reply.status(400).send({ error: "API key inválida." });
-
-    try {
-      const result = await syncWebshareProxies(sb, req.userId!, apiKey);
-      const assigned = await autoAssignProxiesToAccounts(sb, req.userId!);
-      // Guardar API key cifrada en el perfil para futuros syncs
-      if (body.api_key?.trim()) {
-        await sb.from("profiles").update({ webshare_api_key_encrypted: encryptSecret(apiKey) }).eq("id", req.userId!);
-      }
-      return { ...result, assigned };
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      if (msg.includes("webshare_invalid_api_key")) return reply.status(401).send({ error: "API key de Webshare inválida." });
-      return reply.status(502).send({ error: msg });
-    }
-  });
-
-  app.post("/proxies/:id/assign", async (req, reply) => {
-    const { id } = req.params as { id: string };
-    const { account_id } = (req.body ?? {}) as { account_id?: string };
-    // Verificar que el proxy pertenece al usuario
-    const { data: proxy } = await sb.from("proxies").select("id,account_id").eq("id", id).eq("user_id", req.userId!).maybeSingle();
-    if (!proxy) return reply.status(404).send({ error: "proxy_not_found" });
-
-    // Desasignar cuenta previa si había
-    if (proxy.account_id && proxy.account_id !== account_id) {
-      await sb.from("linkedin_accounts").update({ proxy_id: null }).eq("id", proxy.account_id as string);
-    }
-
-    if (account_id) {
-      // Verificar que la cuenta pertenece al usuario
-      const { data: acc } = await sb.from("linkedin_accounts").select("id,proxy_id").eq("id", account_id).eq("user_id", req.userId!).maybeSingle();
-      if (!acc) return reply.status(404).send({ error: "account_not_found" });
-      // Liberar proxy anterior de la cuenta si tenía otro
-      if (acc.proxy_id && acc.proxy_id !== id) {
-        await sb.from("proxies").update({ account_id: null }).eq("id", acc.proxy_id as string);
-      }
-      await Promise.all([
-        sb.from("proxies").update({ account_id }).eq("id", id),
-        sb.from("linkedin_accounts").update({ proxy_id: id }).eq("id", account_id),
-      ]);
-    } else {
-      // Desasignar
-      await sb.from("proxies").update({ account_id: null }).eq("id", id);
-    }
-    return { ok: true };
-  });
-
-  app.get("/proxies/webshare-key", async (req) => {
-    const { data } = await sb.from("profiles").select("webshare_api_key_encrypted").eq("id", req.userId!).single();
-    return { has_key: !!data?.webshare_api_key_encrypted };
   });
 
   app.get("/linkedin-accounts", async (req) => {

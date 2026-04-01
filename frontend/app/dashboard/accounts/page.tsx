@@ -364,7 +364,7 @@ export default function AccountsPage() {
                   className="rounded-[var(--radius-sm)] bg-amber-500/10 px-2 py-0.5 text-xs text-amber-400 hover:bg-amber-500/20"
                   onClick={() => setProxyOpen(proxyOpen === a.id ? null : a.id)}
                 >
-                  {proxyOpen === a.id ? "cancelar" : "proxy de app ·  usar el mío"}
+                  {proxyOpen === a.id ? "cancelar" : "sin proxy · conectar el mío"}
                 </button>
               )}
               {proxyOpen === a.id && (

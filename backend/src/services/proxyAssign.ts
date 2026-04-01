@@ -35,9 +35,10 @@ export async function loadProxy(
 }
 
 /**
- * Devuelve el proxy_id asignado a la cuenta. Si la cuenta no tiene uno asignado,
- * busca el primer proxy libre del usuario y lo asigna.
- * Devuelve null si el usuario no tiene proxies o todos están ocupados.
+ * Devuelve el proxy_id asignado a la cuenta. Si no tiene uno, asigna automáticamente:
+ * 1. Primero busca en el pool global de la app (user_id IS NULL)
+ * 2. Si no hay, busca en los proxies propios del usuario
+ * Devuelve null si no hay proxies libres disponibles.
  */
 export async function pickProxyForAccount(
   sb: SupabaseClient,
@@ -56,17 +57,29 @@ export async function pickProxyForAccount(
     // proxy degradado/inactivo — busca uno nuevo
   }
 
-  // Busca un proxy del usuario sin cuenta asignada (libre)
-  const { data: free } = await sb
+  // 1. Buscar proxy libre del pool de la app (user_id IS NULL)
+  const { data: appFree } = await sb
     .from("proxies")
     .select("id")
-    .eq("user_id", userId)
+    .is("user_id", null)
     .eq("status", "active")
     .is("account_id", null)
     .order("created_at", { ascending: true })
     .limit(1);
 
-  const picked = free?.[0]?.id as string | undefined;
+  // 2. Si no hay en el pool de la app, buscar proxy propio del usuario
+  const { data: userFree } = !appFree?.[0]
+    ? await sb
+        .from("proxies")
+        .select("id")
+        .eq("user_id", userId)
+        .eq("status", "active")
+        .is("account_id", null)
+        .order("created_at", { ascending: true })
+        .limit(1)
+    : { data: null };
+
+  const picked = (appFree?.[0]?.id ?? userFree?.[0]?.id) as string | undefined;
   if (!picked) return null;
 
   // Asignar el proxy a la cuenta (1:1)
@@ -76,13 +89,14 @@ export async function pickProxyForAccount(
 }
 
 /**
- * Sincroniza los proxies de Webshare.io para un usuario.
- * Hace upsert por (user_id, webshare_proxy_id) — no duplica en re-syncs.
- * Devuelve cuántos se insertaron y cuántos ya existían.
+ * Sincroniza los proxies de Webshare.io.
+ * userId = null → proxies del pool de la app (sin dueño, asignables a cualquier cuenta)
+ * userId = string → proxies propios de un usuario
+ * Hace upsert por webshare_proxy_id — no duplica en re-syncs.
  */
 export async function syncWebshareProxies(
   sb: SupabaseClient,
-  userId: string,
+  userId: string | null,
   apiKey: string
 ): Promise<{ inserted: number; updated: number; total: number }> {
   const proxies = await fetchWebshareProxies(apiKey);
@@ -95,15 +109,14 @@ export async function syncWebshareProxies(
 
     const passwordEncrypted = encryptSecret(p.password);
 
-    const { data: existing } = await sb
+    const query = sb
       .from("proxies")
       .select("id")
-      .eq("user_id", userId)
-      .eq("webshare_proxy_id", p.id)
-      .maybeSingle();
+      .eq("webshare_proxy_id", p.id);
+
+    const { data: existing } = await (userId ? query.eq("user_id", userId) : query.is("user_id", null)).maybeSingle();
 
     if (existing) {
-      // Actualizar credenciales (pueden cambiar en Webshare)
       await sb
         .from("proxies")
         .update({
@@ -117,7 +130,7 @@ export async function syncWebshareProxies(
       updated++;
     } else {
       await sb.from("proxies").insert({
-        user_id: userId,
+        user_id: userId ?? null,
         host: p.proxy_address,
         port: p.ports.http,
         username: p.username,
@@ -140,19 +153,34 @@ export async function autoAssignProxiesToAccounts(
   sb: SupabaseClient,
   userId: string
 ): Promise<number> {
-  const [{ data: accounts }, { data: freeProxies }] = await Promise.all([
-    sb.from("linkedin_accounts").select("id").eq("user_id", userId).is("proxy_id", null),
-    sb
-      .from("proxies")
-      .select("id")
-      .eq("user_id", userId)
-      .eq("status", "active")
-      .is("account_id", null)
-      .order("created_at", { ascending: true }),
-  ]);
+  // Cuentas sin proxy del usuario
+  const { data: accounts } = await sb
+    .from("linkedin_accounts")
+    .select("id")
+    .eq("user_id", userId)
+    .is("proxy_id", null);
+
+  // Proxies libres: primero del pool de la app (user_id NULL), luego propios del usuario
+  const { data: appProxies } = await sb
+    .from("proxies")
+    .select("id")
+    .is("user_id", null)
+    .eq("status", "active")
+    .is("account_id", null)
+    .order("created_at", { ascending: true });
+
+  const { data: userProxies } = await sb
+    .from("proxies")
+    .select("id")
+    .eq("user_id", userId)
+    .eq("status", "active")
+    .is("account_id", null)
+    .order("created_at", { ascending: true });
+
+  const freeProxies = [...(appProxies ?? []), ...(userProxies ?? [])];
 
   const accountList = accounts ?? [];
-  const proxyList = freeProxies ?? [];
+  const proxyList = freeProxies;
   let assigned = 0;
 
   for (let i = 0; i < accountList.length && i < proxyList.length; i++) {
