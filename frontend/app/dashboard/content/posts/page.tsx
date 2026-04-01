@@ -325,8 +325,9 @@ export default function ContentPostsPage() {
         {posts.map((p) => {
           const account = accountById[p.account_id];
           const name = account?.li_display_name ?? `Cuenta ${p.account_id.slice(0, 8)}`;
-          const photo = account?.li_photo_url;
-          const headline = account?.li_headline;
+          const photo = account?.li_photo_url ?? null;
+          const headline = account?.li_headline ?? null;
+          const initial = (account?.li_display_name ?? p.account_id).charAt(0).toUpperCase();
           return (
             <article key={p.id} className="card flex flex-col overflow-hidden shadow-[var(--shadow-sm)]">
               {/* Header estilo LinkedIn */}
@@ -337,7 +338,7 @@ export default function ContentPostsPage() {
                     <img src={photo} alt={name} className="h-11 w-11 rounded-full object-cover ring-1 ring-[var(--border)]" />
                   ) : (
                     <div className="flex h-11 w-11 items-center justify-center rounded-full bg-[color-mix(in_srgb,var(--accent)_18%,var(--surface))] text-base font-bold text-[var(--accent)] ring-1 ring-[var(--border)]">
-                      {name.charAt(0).toUpperCase()}
+                      {initial}
                     </div>
                   )}
                 </div>
@@ -358,7 +359,7 @@ export default function ContentPostsPage() {
 
               {/* Texto del post */}
               <div className="px-4 pt-3">
-                <p className="whitespace-pre-line text-sm leading-relaxed text-[var(--text)] line-clamp-[8]">
+                <p className="line-clamp-4 whitespace-pre-line text-sm leading-relaxed text-[var(--text)]">
                   {p.content}
                 </p>
               </div>
@@ -370,7 +371,7 @@ export default function ContentPostsPage() {
                     src={p.image_url}
                     alt="Imagen del post"
                     className="w-full object-cover"
-                    style={{ maxHeight: "320px" }}
+                    style={{ maxHeight: "200px" }}
                     onError={(e) => { (e.currentTarget as HTMLImageElement).style.display = "none"; }}
                   />
                 </div>
