@@ -1528,6 +1528,70 @@ export async function registerApiRoutes(app: FastifyInstance) {
     return { ok: true };
   });
 
+  app.get("/crm-summary", async (req) => {
+    const userId = req.userId!;
+
+    // Cuentas del usuario
+    const { data: accounts } = await sb.from("linkedin_accounts").select("id,connection_status,li_display_name").eq("user_id", userId);
+    const accountIds = (accounts ?? []).map((a) => a.id);
+
+    // Pipeline: enrollments agrupados por crm_status
+    const { data: enrollments } = await sb
+      .from("campaign_enrollments")
+      .select("crm_status, status, campaign_id, lead_id, leads(id, name, photo_url, title, company)")
+      .in("campaign_id", (await sb.from("campaigns").select("id").eq("user_id", userId)).data?.map((c) => c.id) ?? []);
+
+    const pipeline: Record<string, number> = {
+      not_contacted: 0, in_campaign: 0, contacted: 0, replied: 0, not_accepted: 0, blacklist: 0,
+    };
+    for (const e of enrollments ?? []) {
+      const k = e.crm_status as string;
+      if (k in pipeline) pipeline[k]++;
+    }
+
+    // Últimos 8 leads que respondieron (replied)
+    const recentReplied = (enrollments ?? [])
+      .filter((e) => e.crm_status === "replied")
+      .slice(0, 8)
+      .map((e) => {
+        const l = (e.leads as unknown) as { id: string; name: string | null; photo_url: string | null; title: string | null; company: string | null } | null;
+        return { lead_id: e.lead_id, name: l?.name ?? null, photo_url: l?.photo_url ?? null, title: l?.title ?? null, company: l?.company ?? null };
+      });
+
+    // Campañas activas
+    const { data: campaigns } = await sb.from("campaigns").select("id,name,status").eq("user_id", userId).eq("status", "active");
+
+    // Tareas: conteo por estado
+    const taskCountsRaw = await Promise.all(
+      (["pending", "running", "completed", "dead"] as const).map(async (s) => {
+        const { count } = await sb.from("tasks").select("id", { count: "exact", head: true }).in("account_id", accountIds).eq("status", s);
+        return [s, count ?? 0] as const;
+      })
+    );
+    const taskCounts = Object.fromEntries(taskCountsRaw);
+
+    // Últimos 6 mensajes enviados
+    const { data: recentMessages } = await sb
+      .from("messages")
+      .select("id, body, created_at, direction, account_id, peer_name, peer_photo_url")
+      .in("account_id", accountIds)
+      .order("created_at", { ascending: false })
+      .limit(6);
+
+    // Total leads
+    const { count: totalLeads } = await sb.from("leads").select("id", { count: "exact", head: true }).eq("user_id", userId);
+
+    return {
+      pipeline,
+      recent_replied: recentReplied,
+      campaigns_active: campaigns ?? [],
+      task_counts: taskCounts,
+      recent_messages: recentMessages ?? [],
+      total_leads: totalLeads ?? 0,
+      accounts_active: (accounts ?? []).filter((a) => a.connection_status === "active").length,
+    };
+  });
+
   app.get("/tasks", async (req) => {
     const { data: accounts } = await sb.from("linkedin_accounts").select("id").eq("user_id", req.userId!);
     const ids = accounts?.map((a) => a.id) ?? [];
