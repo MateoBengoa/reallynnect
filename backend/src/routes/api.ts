@@ -1331,14 +1331,18 @@ export async function registerApiRoutes(app: FastifyInstance) {
 
   app.patch("/brain", async (req, reply) => {
     const schema = z.object({
-      company_name: z.string().optional(),
-      description:  z.string().optional(),
-      products:     z.string().optional(),
-      audience:     z.string().optional(),
-      tone:         z.string().optional(),
-      value_prop:   z.string().optional(),
-      keywords:     z.string().optional(),
-      extra:        z.string().optional(),
+      brand_type:     z.string().optional(),
+      company_name:   z.string().optional(),
+      description:    z.string().optional(),
+      products:       z.string().optional(),
+      audience:       z.string().optional(),
+      tone:           z.string().optional(),
+      value_prop:     z.string().optional(),
+      keywords:       z.string().optional(),
+      extra:          z.string().optional(),
+      full_name:      z.string().optional(),
+      personal_role:  z.string().optional(),
+      personal_story: z.string().optional(),
     });
     const body = schema.parse(req.body ?? {});
     const { data, error } = await sb
@@ -1348,6 +1352,57 @@ export async function registerApiRoutes(app: FastifyInstance) {
       .single();
     if (error) return reply.status(400).send({ error: error.message });
     return { brain: data };
+  });
+
+  // Subir foto al cerebro
+  app.post("/brain/photos", async (req, reply) => {
+    const file = await req.file();
+    if (!file) return reply.status(400).send({ error: "No file" });
+
+    const allowed = ["image/jpeg", "image/png", "image/webp", "image/gif"];
+    if (!allowed.includes(file.mimetype)) return reply.status(400).send({ error: "Formato no soportado (jpg/png/webp/gif)" });
+
+    const ext = file.mimetype.split("/")[1] ?? "jpg";
+    const storagePath = `${req.userId!}/${Date.now()}.${ext}`;
+    const bytes = await file.toBuffer();
+
+    // Crear bucket si no existe (idempotente)
+    await sb.storage.createBucket("brain-photos", { public: true }).catch(() => {});
+
+    const { error: upErr } = await sb.storage
+      .from("brain-photos")
+      .upload(storagePath, bytes, { contentType: file.mimetype, upsert: false });
+    if (upErr) return reply.status(400).send({ error: upErr.message });
+
+    const { data: { publicUrl } } = sb.storage.from("brain-photos").getPublicUrl(storagePath);
+
+    const { data: photo, error } = await sb
+      .from("brain_photos")
+      .insert({ user_id: req.userId!, url: publicUrl, storage_path: storagePath })
+      .select("*")
+      .single();
+    if (error) return reply.status(400).send({ error: error.message });
+    return { photo };
+  });
+
+  // Listar fotos del cerebro
+  app.get("/brain/photos", async (req) => {
+    const { data } = await sb
+      .from("brain_photos")
+      .select("*")
+      .eq("user_id", req.userId!)
+      .order("created_at", { ascending: false });
+    return { photos: data ?? [] };
+  });
+
+  // Eliminar foto
+  app.delete("/brain/photos/:id", async (req, reply) => {
+    const id = (req.params as { id: string }).id;
+    const { data: photo } = await sb.from("brain_photos").select("*").eq("id", id).eq("user_id", req.userId!).maybeSingle();
+    if (!photo) return reply.status(404).send({ error: "Not found" });
+    await sb.storage.from("brain-photos").remove([photo.storage_path]);
+    await sb.from("brain_photos").delete().eq("id", id);
+    return { ok: true };
   });
 
   // ─── Posts ────────────────────────────────────────────────────────────────

@@ -28,27 +28,42 @@ Write a short helpful professional reply under 400 characters. Output only the r
 }
 
 export type BrainContext = {
-  company_name?: string;
-  description?:  string;
-  products?:     string;
-  audience?:     string;
-  tone?:         string;
-  value_prop?:   string;
-  keywords?:     string;
-  extra?:        string;
+  brand_type?:     string;
+  company_name?:   string;
+  description?:    string;
+  products?:       string;
+  audience?:       string;
+  tone?:           string;
+  value_prop?:     string;
+  keywords?:       string;
+  extra?:          string;
+  full_name?:      string;
+  personal_role?:  string;
+  personal_story?: string;
 };
 
 export async function generatePost(topic: string, brain?: BrainContext | null): Promise<{ text: string; imageDescription?: string }> {
+  const isPersonal = brain?.brand_type === "personal";
   const brainBlock = brain
-    ? `\nBusiness context (use this to personalize the post):\n` +
-      (brain.company_name ? `- Company: ${brain.company_name}\n` : "") +
-      (brain.description  ? `- What we do: ${brain.description}\n` : "") +
-      (brain.products     ? `- Products/services: ${brain.products}\n` : "") +
-      (brain.audience     ? `- Target audience: ${brain.audience}\n` : "") +
-      (brain.tone         ? `- Tone/voice: ${brain.tone}\n` : "") +
-      (brain.value_prop   ? `- Value proposition: ${brain.value_prop}\n` : "") +
-      (brain.keywords     ? `- Keywords/hashtags: ${brain.keywords}\n` : "") +
-      (brain.extra        ? `- Extra context: ${brain.extra}\n` : "")
+    ? isPersonal
+      ? `\nPersonal brand context (write in first person, authentic voice):\n` +
+        (brain.full_name      ? `- Author: ${brain.full_name}\n` : "") +
+        (brain.personal_role  ? `- Role/title: ${brain.personal_role}\n` : "") +
+        (brain.personal_story ? `- Personal story/background: ${brain.personal_story}\n` : "") +
+        (brain.audience       ? `- Target audience: ${brain.audience}\n` : "") +
+        (brain.tone           ? `- Tone/voice: ${brain.tone}\n` : "") +
+        (brain.value_prop     ? `- Unique value: ${brain.value_prop}\n` : "") +
+        (brain.keywords       ? `- Keywords/hashtags: ${brain.keywords}\n` : "") +
+        (brain.extra          ? `- Extra context: ${brain.extra}\n` : "")
+      : `\nBusiness context (use this to personalize the post):\n` +
+        (brain.company_name ? `- Company: ${brain.company_name}\n` : "") +
+        (brain.description  ? `- What we do: ${brain.description}\n` : "") +
+        (brain.products     ? `- Products/services: ${brain.products}\n` : "") +
+        (brain.audience     ? `- Target audience: ${brain.audience}\n` : "") +
+        (brain.tone         ? `- Tone/voice: ${brain.tone}\n` : "") +
+        (brain.value_prop   ? `- Value proposition: ${brain.value_prop}\n` : "") +
+        (brain.keywords     ? `- Keywords/hashtags: ${brain.keywords}\n` : "") +
+        (brain.extra        ? `- Extra context: ${brain.extra}\n` : "")
     : "";
 
   const prompt = `Generate a professional LinkedIn post about: ${topic}.${brainBlock}
