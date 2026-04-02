@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { useRouter } from "next/navigation";
 import { getValidAccessToken } from "@/lib/supabase";
 import { api } from "@/lib/api";
 import type { ContentAccount, ContentPost } from "@/lib/contentTypes";
@@ -49,11 +50,10 @@ export default function ContentPostsPage() {
   const [manualContent, setManualContent] = useState("");
 
   const [generatingAi, setGeneratingAi] = useState(false);
+  const router = useRouter();
   const [publishingNow, setPublishingNow] = useState<string | null>(null);
   const [scheduleId, setScheduleId] = useState<string | null>(null);
   const [scheduleAt, setScheduleAt] = useState("");
-  const [editId, setEditId] = useState<string | null>(null);
-  const [editContent, setEditContent] = useState("");
 
   const accountById = useMemo(() => Object.fromEntries(accounts.map((a) => [a.id, a])), [accounts]);
 
@@ -147,14 +147,6 @@ export default function ContentPostsPage() {
     await load();
   }
 
-  async function saveEdit() {
-    if (!editId || !editContent.trim()) return;
-    if (!(await getValidAccessToken())) return;
-    await api(`/posts/${editId}`, { method: "PATCH", body: JSON.stringify({ content: editContent.trim() }) });
-    setEditId(null);
-    await load();
-  }
-
   const stepTitle = wizardStep === 1 ? "Cómo quieres crear el post" : wizardStep === 2 ? (createMode === "ai" ? "Tema e imagen" : "Texto y cuenta") : "Listo";
 
   return (
@@ -204,7 +196,11 @@ export default function ContentPostsPage() {
           const headline = account?.li_headline ?? null;
           const initial = (account?.li_display_name ?? p.account_id).charAt(0).toUpperCase();
           return (
-            <article key={p.id} className="card flex flex-col overflow-hidden shadow-[var(--shadow-sm)]">
+            <article
+              key={p.id}
+              className="card flex flex-col overflow-hidden shadow-[var(--shadow-sm)] cursor-pointer transition-[border-color,box-shadow] hover:border-[color-mix(in_srgb,var(--accent)_40%,var(--border))] hover:shadow-[var(--shadow-md)]"
+              onClick={() => router.push(`/dashboard/content/posts/${p.id}`)}
+            >
               {/* Header estilo LinkedIn */}
               <div className="flex items-start gap-3 px-4 pt-4">
                 {photo ? (
@@ -226,6 +222,10 @@ export default function ContentPostsPage() {
                     </p>
                   )}
                 </div>
+                {/* Indicador de editable */}
+                <svg className="mt-0.5 h-4 w-4 shrink-0 text-[var(--muted)] opacity-60" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M13.5 6H5.25A2.25 2.25 0 003 8.25v10.5A2.25 2.25 0 005.25 21h10.5A2.25 2.25 0 0018 18.75V10.5m-10.5 6L21 3m0 0h-5.25M21 3v5.25" />
+                </svg>
               </div>
 
               {/* Texto */}
@@ -248,10 +248,16 @@ export default function ContentPostsPage() {
                 </div>
               )}
 
-              {/* Acciones */}
+              {/* Acciones rápidas */}
               <div className="mt-auto flex flex-wrap gap-2 px-4 pb-4 pt-3">
                 {p.linkedin_activity_url && (
-                  <a href={p.linkedin_activity_url} className="btn-secondary min-h-8 text-xs" target="_blank" rel="noreferrer">
+                  <a
+                    href={p.linkedin_activity_url}
+                    className="btn-secondary min-h-8 text-xs"
+                    target="_blank"
+                    rel="noreferrer"
+                    onClick={(e) => e.stopPropagation()}
+                  >
                     Ver en LinkedIn ↗
                   </a>
                 )}
@@ -261,19 +267,23 @@ export default function ContentPostsPage() {
                       type="button"
                       disabled={publishingNow === p.id}
                       className="btn-primary min-h-8 text-xs disabled:opacity-50"
-                      onClick={() => void publishNow(p.id)}
+                      onClick={(e) => { e.stopPropagation(); void publishNow(p.id); }}
                     >
                       {publishingNow === p.id ? "Encolando…" : "Publicar ahora"}
-                    </button>
-                    <button type="button" className="btn-secondary min-h-8 text-xs" onClick={() => setScheduleId(p.id)}>
-                      Programar
                     </button>
                     <button
                       type="button"
                       className="btn-secondary min-h-8 text-xs"
-                      onClick={() => { setEditId(p.id); setEditContent(p.content); }}
+                      onClick={(e) => { e.stopPropagation(); setScheduleId(p.id); }}
                     >
-                      Editar
+                      Programar
+                    </button>
+                    <button
+                      type="button"
+                      className="btn-ghost min-h-8 text-xs text-[var(--muted)]"
+                      onClick={(e) => { e.stopPropagation(); router.push(`/dashboard/content/posts/${p.id}`); }}
+                    >
+                      Editar →
                     </button>
                   </>
                 )}
@@ -416,19 +426,6 @@ export default function ContentPostsPage() {
         </div>
       )}
 
-      {/* Modal editar */}
-      {editId && (
-        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 p-4">
-          <div className="popover-panel w-full max-w-lg p-4">
-            <p className="mb-2 font-medium text-[var(--text)]">Editar borrador</p>
-            <textarea className="input-field mb-3 min-h-[180px] py-2 text-sm" value={editContent} onChange={(e) => setEditContent(e.target.value)} />
-            <div className="flex gap-2">
-              <button type="button" className="btn-primary flex-1" onClick={() => void saveEdit()}>Guardar</button>
-              <button type="button" className="btn-secondary flex-1" onClick={() => setEditId(null)}>Cancelar</button>
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   );
 }

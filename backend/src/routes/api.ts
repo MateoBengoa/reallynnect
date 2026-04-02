@@ -1361,6 +1361,31 @@ export async function registerApiRoutes(app: FastifyInstance) {
     return { post };
   });
 
+  app.get("/posts/:id", async (req, reply) => {
+    const id = (req.params as { id: string }).id;
+    const { data: post } = await sb.from("posts").select("*").eq("id", id).maybeSingle();
+    if (!post) return reply.status(404).send({ error: "Not found" });
+    const { data: acc } = await sb.from("linkedin_accounts").select("user_id").eq("id", post.account_id).single();
+    if (!acc || acc.user_id !== req.userId) return reply.status(404).send({ error: "Not found" });
+    return { post };
+  });
+
+  // Genera una imagen de previsualización sin guardarla en BD
+  app.post("/posts/:id/preview-image", async (req, reply) => {
+    const id = (req.params as { id: string }).id;
+    const { data: post } = await sb.from("posts").select("id, account_id, content, status").eq("id", id).maybeSingle();
+    if (!post) return reply.status(404).send({ error: "Not found" });
+    const { data: acc } = await sb.from("linkedin_accounts").select("user_id").eq("id", post.account_id).single();
+    if (!acc || acc.user_id !== req.userId) return reply.status(404).send({ error: "Not found" });
+    if (!process.env.GEMINI_API_KEY) return reply.status(503).send({ error: "GEMINI_API_KEY not configured" });
+    const content = String(post.content ?? "");
+    const topic = content.split("\n")[0]?.slice(0, 120) ?? content.slice(0, 120);
+    const brief = await generateIllustrationBrief(topic, content);
+    const bytes = await generateImageBytes(brief);
+    if (!bytes) return reply.status(500).send({ error: "No se pudo generar la imagen" });
+    return { image_url: `data:image/png;base64,${bytes.toString("base64")}` };
+  });
+
   app.patch("/posts/:id", async (req, reply) => {
     const id = (req.params as { id: string }).id;
     const schema = z.object({
@@ -1406,6 +1431,43 @@ export async function registerApiRoutes(app: FastifyInstance) {
       .single();
     if (error) return reply.status(400).send({ error: error.message });
     return { post };
+  });
+
+  // Regenerar / generar una nueva imagen para un post existente
+  app.post("/posts/:id/regenerate-image", async (req, reply) => {
+    const id = (req.params as { id: string }).id;
+    const { data: post } = await sb
+      .from("posts")
+      .select("id, account_id, content, status")
+      .eq("id", id)
+      .maybeSingle();
+    if (!post) return reply.status(404).send({ error: "Not found" });
+    const { data: acc } = await sb
+      .from("linkedin_accounts")
+      .select("user_id")
+      .eq("id", post.account_id)
+      .single();
+    if (!acc || acc.user_id !== req.userId) return reply.status(404).send({ error: "Not found" });
+    if (post.status !== "draft") return reply.status(400).send({ error: "Solo se regeneran imágenes de borradores" });
+    if (!process.env.GEMINI_API_KEY) return reply.status(503).send({ error: "GEMINI_API_KEY not configured" });
+
+    // Extraer un "topic" del contenido del post (primera línea o primeros 120 chars)
+    const content = String(post.content ?? "");
+    const topic = content.split("\n")[0]?.slice(0, 120) ?? content.slice(0, 120);
+
+    const brief = await generateIllustrationBrief(topic, content);
+    const bytes = await generateImageBytes(brief);
+    if (!bytes) return reply.status(500).send({ error: "No se pudo generar la imagen" });
+
+    const image_url = `data:image/png;base64,${bytes.toString("base64")}`;
+    const { data, error } = await sb
+      .from("posts")
+      .update({ image_url })
+      .eq("id", id)
+      .select("*")
+      .single();
+    if (error) return reply.status(400).send({ error: error.message });
+    return { post: data };
   });
 
   app.post("/posts/:id/schedule", async (req, reply) => {
