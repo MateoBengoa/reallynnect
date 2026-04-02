@@ -27,9 +27,18 @@ async function forward(req: NextRequest, pathSegments: string[]): Promise<NextRe
   const method = req.method;
   const body = method === "GET" || method === "HEAD" ? undefined : await req.arrayBuffer();
 
-  const longApifyPath = pathSegments.join("/") === "leads/apify-import";
-  const proxyTimeoutMs =
-    method === "POST" && longApifyPath ? 55 * 60 * 1000 : 120_000;
+  const joined = pathSegments.join("/");
+  const longApifyPath = joined === "leads/apify-import";
+  const imageGenPath =
+    method === "POST" &&
+    (joined === "posts/generate" ||
+      joined.endsWith("/preview-image") ||
+      joined.endsWith("/regenerate-image"));
+  const proxyTimeoutMs = longApifyPath
+    ? 55 * 60 * 1000
+    : imageGenPath
+    ? 8 * 60 * 1000   // 8 min para generación de imágenes Gemini
+    : 120_000;
   const ac = new AbortController();
   const timeoutId = setTimeout(() => ac.abort(), proxyTimeoutMs);
 

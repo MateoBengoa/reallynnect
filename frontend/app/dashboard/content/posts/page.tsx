@@ -45,7 +45,6 @@ export default function ContentPostsPage() {
   const [createMode, setCreateMode] = useState<CreateMode | null>(null);
   const [wizardError, setWizardError] = useState<string | null>(null);
   const [topic, setTopic] = useState("");
-  const [withImage, setWithImage] = useState(false);
   const [manualAccount, setManualAccount] = useState("");
   const [manualContent, setManualContent] = useState("");
 
@@ -82,7 +81,6 @@ export default function ContentPostsPage() {
     setWizardStep(1);
     setCreateMode(null);
     setTopic("");
-    setWithImage(false);
     setManualContent("");
     if (accounts[0]) setManualAccount(accounts[0].id);
     setWizardOpen(true);
@@ -101,7 +99,7 @@ export default function ContentPostsPage() {
     if (!(await getValidAccessToken())) return;
     setGeneratingAi(true);
     try {
-      await api("/posts/generate", { method: "POST", body: JSON.stringify({ topic: topic.trim(), with_image: withImage }) });
+      await api("/posts/generate", { method: "POST", body: JSON.stringify({ topic: topic.trim() }) });
       setWizardStep(3);
       await load();
     } catch (e) {
@@ -343,10 +341,9 @@ export default function ContentPostsPage() {
                     <span className={`${labelCap} mb-2`}>Tema del post</span>
                     <input className="input-field text-sm" placeholder="Ej. tendencias B2B en 2026" value={topic} onChange={(e) => setTopic(e.target.value)} autoFocus />
                   </label>
-                  <label className="flex cursor-pointer items-center justify-between gap-3 rounded-[var(--radius-md)] border border-[var(--border)] bg-[color-mix(in_srgb,var(--text)_2%,var(--surface))] px-3.5 py-3">
-                    <span className="text-sm text-[var(--text)]">Generar imagen con Gemini</span>
-                    <input type="checkbox" checked={withImage} onChange={(e) => setWithImage(e.target.checked)} className="h-4 w-4 accent-[var(--accent)]" />
-                  </label>
+                  <p className="rounded-[var(--radius-md)] border border-[var(--border)] bg-[color-mix(in_srgb,var(--text)_2%,var(--surface))] px-3.5 py-2.5 text-xs text-[var(--muted)]">
+                    El borrador se crea en segundos. La imagen se genera desde la tarjeta una vez creado.
+                  </p>
                 </div>
               )}
 

@@ -107,11 +107,23 @@ export async function generateImageBytes(imagePrompt: string): Promise<Buffer | 
     generationConfig: { responseModalities: ["TEXT", "IMAGE"] },
   };
 
-  const res = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
+  const ac = new AbortController();
+  const tid = setTimeout(() => ac.abort(), 5 * 60 * 1000); // 5 min max
+
+  let res: Response;
+  try {
+    res = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      signal: ac.signal,
+    });
+  } catch (e) {
+    console.error("Gemini image fetch error", e);
+    return null;
+  } finally {
+    clearTimeout(tid);
+  }
 
   if (!res.ok) {
     const t = await res.text();
