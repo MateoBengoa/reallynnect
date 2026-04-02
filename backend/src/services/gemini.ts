@@ -33,7 +33,7 @@ Tone: thought leadership, educational, engaging.
 Return JSON only (no markdown fences):
 {
   "post": "the full post text",
-  "imageDescription": "Design a UNIQUE flat-design illustration for this specific post. Rules: (1) Base it on a CONCRETE METAPHOR or specific object directly from the post topic — NOT generic tech imagery. (2) FORBIDDEN: glowing brains, neural networks, circuit boards, blue neon, abstract orbs, generic robots, chip silhouettes, data streams. (3) Describe a simple scene with 2-3 bold flat colors, clean shapes, no gradients. (4) Example for a post about Claude AI: a friendly speech bubble made of building blocks with an 'A' and a 'C' interlocking, warm orange and white palette, minimal background. (5) Include: main object, secondary element, color palette (name the exact colors), composition (centered/left-heavy/etc), and overall mood."
+  "imageDescription": "A short visual concept for the post. Choose ONE of these styles: (A) Real-world photo of 1-2 professionals in a modern office/meeting, (B) Clean modern digital art or infographic with a professional color palette, (C) A clean diagram or flowchart. NEVER use: neon glows, holographic UI, sci-fi circuits, comic/cartoon characters, or overly saturated blue-purple futuristic palettes."
 }`;
   const raw = await callGeminiText(prompt);
   try {
@@ -48,33 +48,49 @@ Return JSON only (no markdown fences):
 }
 
 /**
- * Genera un prompt fotográfico profesional para la imagen del post.
- * El brief describe la ACTIVIDAD HUMANA detrás del tema, nunca elementos tech/IA.
+ * Genera el prompt final para el modelo de imagen.
+ * Estrategia: el modelo de texto SOLO rellena 3 datos concretos (persona, acción, lugar).
+ * El prompt completo con todos los modificadores fotorrealistas se construye aquí,
+ * sin dejar que el modelo invente el estilo.
  */
 export async function generateIllustrationBrief(topic: string, postText: string): Promise<string> {
-  const prompt = `You are a editorial stock photographer. Your job is to describe a real-world photo scene for a LinkedIn post.
+  const slotPrompt = `LinkedIn post topic: "${topic}"
+Post (excerpt): "${postText.slice(0, 200)}"
 
-Post topic: "${topic}"
-Post excerpt: "${postText.slice(0, 400)}"
+Fill in exactly 3 lines. Be concrete. Think of a mundane business moment that SHOWS (not symbolizes) what the post is about.
 
-Rules:
-- Describe what a PHOTOGRAPHER could literally capture with a camera — no digital art, no illustrations
-- Focus on the HUMAN OUTCOME or EMOTION behind the topic, not the technology itself
-  (e.g. "AI productivity" → a relaxed professional reviewing a printed report with a coffee, satisfied expression; NOT a person with holographic AI diagrams)
-  (e.g. "leadership" → a confident woman standing at a whiteboard explaining something to 2 attentive colleagues)
-  (e.g. "data analysis" → a focused analyst circling numbers on a printed spreadsheet at a clean desk)
-- 1-2 real people maximum, clearly showing emotion or action that communicates the post message
-- Environment: modern office, coffee shop, or meeting room — real furniture, real light
-- NEVER include: screens showing UIs, glowing effects, holographic elements, floating text, neural networks, circuits, neon lights, robots, digital overlays, sci-fi elements
-- Lighting: natural window light or warm overhead office light, no dramatic shadows
-- Composition: shallow depth of field, subject in focus, clean background
+PERSON: [job title] [gender] [age range] [specific clothing item]
+ACTION: [physical verb] [specific physical object]
+SETTING: [room type], [one furniture item], [one other detail]
 
-Write ONLY the scene description in 2-3 sentences. No introduction, no explanation.`;
+Critical rules:
+- No laptops, phones, or visible screens
+- No abstract objects (no lightbulbs, brains, networks, gears, globes)
+- Just ordinary office reality that any photographer could capture
+- The ACTION must be directly related to the post topic
 
-  const brief = (await callGeminiText(prompt)).trim().slice(0, 600);
+Examples:
+Topic "sales strategy" → PERSON: sales manager, man, 40s, navy blazer | ACTION: drawing a funnel diagram on a whiteboard | SETTING: glass-walled meeting room, long table, water glasses
+Topic "remote work" → PERSON: freelancer, woman, 30s, oversized grey sweater | ACTION: writing in a notebook with coffee cup beside her | SETTING: home office corner, wooden desk, bookshelf
 
-  // Prepend hard negative prefix so the image model ignores its default "AI aesthetic"
-  return `Photorealistic DSLR photograph, Canon 5D Mark IV. No digital effects, no glowing elements, no holographic UI, no floating text, no neural network diagrams, no neon lights, no sci-fi elements, no illustrations, no digital art. ${brief} Editorial style, shallow depth of field, soft natural light, shot on 50mm lens. No text in image.`;
+Output ONLY the 3 lines starting with PERSON:, ACTION:, SETTING:`;
+
+  const raw = (await callGeminiText(slotPrompt)).trim();
+
+  const person  = raw.match(/PERSON:\s*(.+)/i)?.[1]?.trim()  ?? "business professional, gender-neutral, 35, smart casual attire";
+  const action  = raw.match(/ACTION:\s*(.+)/i)?.[1]?.trim()  ?? "reviewing a printed report with a pen in hand";
+  const setting = raw.match(/SETTING:\s*(.+)/i)?.[1]?.trim() ?? "bright modern office, wooden desk, window with soft light";
+
+  // Construir el prompt final — todos los modificadores de foto los ponemos nosotros
+  return (
+    `Realistic photograph of a ${person}, ${action}, ${setting}. ` +
+    `Soft natural window light from the side, warm neutral tones. ` +
+    `Fujifilm GFX 100S, 55mm f/2.8, medium format, ISO 200, very slight film grain. ` +
+    `Subject in sharp focus, background gently blurred. ` +
+    `Candid, unposed moment. Magazine editorial style. ` +
+    `IMPORTANT: real photograph, NOT illustration, NOT digital art, NOT cartoon, NOT concept art. ` +
+    `Zero glowing effects, zero holograms, zero floating UI, zero neon, zero circuit patterns, zero sci-fi elements, zero text overlays.`
+  );
 }
 
 export async function generateImageBytes(imagePrompt: string): Promise<Buffer | null> {
@@ -86,7 +102,7 @@ export async function generateImageBytes(imagePrompt: string): Promise<Buffer | 
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${key}`;
 
   const body = {
-    contents: [{ parts: [{ text: imagePrompt }] }],
+    contents: [{ parts: [{ text: `Generate a REALISTIC PHOTOGRAPH (not an illustration, not digital art, not cartoon): ${imagePrompt}` }] }],
     generationConfig: { responseModalities: ["TEXT", "IMAGE"] },
   };
 

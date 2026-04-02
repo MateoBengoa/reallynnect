@@ -45,7 +45,17 @@ export default function PostDetailPage() {
   const load = useCallback(async () => {
     if (!(await getValidAccessToken())) return;
     try {
-      const { post: p } = await api<{ post: ContentPost }>(`/posts/${postId}`);
+      // Intentar GET /posts/:id; si no existe (backend viejo), cargar lista y filtrar
+      let p: ContentPost | null = null;
+      try {
+        const res = await api<{ post: ContentPost }>(`/posts/${postId}`);
+        p = res.post;
+      } catch {
+        const { posts } = await api<{ posts: ContentPost[] }>("/posts");
+        p = posts.find((x) => x.id === postId) ?? null;
+      }
+      if (!p) { setNotFound(true); return; }
+
       setPost(p);
       setContent(p.content);
       if (p.image_url) {
