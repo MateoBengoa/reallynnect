@@ -48,42 +48,49 @@ Return JSON only (no markdown fences):
 }
 
 /**
- * Genera el prompt de imagen.
- * El modelo de texto SOLO responde "qué hace la persona" (verbo + objeto físico).
- * Todo lo demás (cámara, luz, persona, negativas) lo construimos en código.
+ * Genera el prompt final para el modelo de imagen.
+ * Usa un template fijo de foto editorial profesional para evitar que el modelo
+ * de texto introduzca vocabulario que dispara el estilo sci-fi/neon.
+ * Solo varía la acción específica según el tema del post.
  */
 export async function generateIllustrationBrief(topic: string, postText: string): Promise<string> {
-  // Solo pedimos UNA cosa: qué acción física muestra el beneficio del post
-  const actionPrompt = `LinkedIn post about: "${topic}"
-Post: "${postText.slice(0, 150)}"
+  const t = (topic + " " + postText).toLowerCase();
 
-What is ONE physical, real-world action a professional person would do that REPRESENTS the benefit of this post?
-The action must use ONLY physical objects: paper, pen, whiteboard, notebook, coffee mug, printed documents, books.
-NEVER use: laptop, phone, screen, computer, keyboard, digital, AI, data, virtual.
+  // Mapeo por palabras clave → acción física mundana sin tecnología
+  let action: string;
+  if (/leader|manag|team|direct|jefe|equipo|gestión|lideraz/.test(t)) {
+    action = "writing key points on a large whiteboard with a black marker, turned slightly toward camera";
+  } else if (/sales|venta|revenue|deal|cliente|client|negoci/.test(t)) {
+    action = "reviewing a printed sales report with a red pen, making notes in the margins";
+  } else if (/market|brand|content|creativ|diseño|design|social/.test(t)) {
+    action = "sketching a layout on a large sheet of paper with colored markers";
+  } else if (/product|eficien|efficien|work|work|tarea|task|focus|produc/.test(t)) {
+    action = "organizing a neat stack of documents with a satisfied expression";
+  } else if (/growth|crec|strateg|estrateg|plan|goal|objetivo/.test(t)) {
+    action = "drawing an upward arrow on a paper diagram laid flat on the desk";
+  } else if (/data|analy|analíti|insight|metric|kpi|report/.test(t)) {
+    action = "circling important numbers on a printed spreadsheet with a highlighter";
+  } else if (/innov|startup|emprend|idea|future|futuro/.test(t)) {
+    action = "writing ideas on sticky notes and placing them on a glass wall";
+  } else {
+    action = "reading a printed document with focused attention, pen in hand";
+  }
 
-Example for "AI productivity": "signing off on a finished project document, smiling"
-Example for "leadership": "pointing at a section of a printed roadmap on a table"
-Example for "sales": "drawing an upward arrow on a whiteboard with a marker"
-
-Answer with ONLY the action in 5-10 words. No explanation.`;
-
-  const action = (await callGeminiText(actionPrompt)).trim().slice(0, 120);
-
-  // Construimos el prompt completo nosotros — modelo de texto NO toca el estilo
+  // Template fijo — 90% del prompt es constante y probado
   return (
-    `Hyperrealistic DSLR photograph. ` +
-    `A professional person in their late 30s wearing a plain blazer, ${action}, ` +
-    `inside a minimalist modern office with large windows, wooden furniture, soft plants. ` +
-    `Warm natural afternoon light streaming from the left. ` +
-    `Captured on Canon EOS R5, 85mm f/1.4 lens, ISO 320, shallow depth of field, ` +
-    `bokeh background, skin texture visible, photojournalism style. ` +
-    `Color grading: warm tones, slightly desaturated, clean whites. ` +
-    `The person looks calm and focused. ` +
-    `Style: real photograph as it would appear in Forbes or Harvard Business Review. ` +
-    `STRICT: no illustration, no painting, no digital art, no cartoon, no 3D render, ` +
-    `no neon colors, no glowing elements, no holographic interfaces, no floating text, ` +
-    `no circuit boards, no sci-fi elements, no blue-purple gradients, no dark dramatic lighting. ` +
-    `Background is a real physical office space, not abstract.`
+    `Ultra-realistic Getty Images stock photograph. ` +
+    `A professional woman in her late 30s wearing a light beige blazer over a white shirt, ` +
+    `${action}. ` +
+    `Setting: minimalist modern office, large window behind her showing soft morning light, ` +
+    `a white ceramic coffee mug and small green succulent on the wooden desk. ` +
+    `Background softly blurred (bokeh). ` +
+    `Canon EOS R5, 85mm f/1.8 portrait lens, ISO 200. ` +
+    `Warm, slightly golden color grading. Natural skin texture visible. ` +
+    `Real indoor environment, real human, real physical objects only. ` +
+    `NOT an illustration. NOT digital art. NOT cartoon. NOT painting. NOT 3D render. ` +
+    `ZERO neon. ZERO glowing effects. ZERO holographic panels. ZERO floating text. ` +
+    `ZERO visible computer screens. ZERO sci-fi elements. ZERO blue-purple gradients. ` +
+    `ZERO dark dramatic lighting. ZERO abstract backgrounds.`
   );
 }
 
