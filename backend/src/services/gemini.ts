@@ -48,48 +48,42 @@ Return JSON only (no markdown fences):
 }
 
 /**
- * Genera el prompt final para el modelo de imagen.
- * Estrategia: el modelo de texto SOLO rellena 3 datos concretos (persona, acción, lugar).
- * El prompt completo con todos los modificadores fotorrealistas se construye aquí,
- * sin dejar que el modelo invente el estilo.
+ * Genera el prompt de imagen.
+ * El modelo de texto SOLO responde "qué hace la persona" (verbo + objeto físico).
+ * Todo lo demás (cámara, luz, persona, negativas) lo construimos en código.
  */
 export async function generateIllustrationBrief(topic: string, postText: string): Promise<string> {
-  const slotPrompt = `LinkedIn post topic: "${topic}"
-Post (excerpt): "${postText.slice(0, 200)}"
+  // Solo pedimos UNA cosa: qué acción física muestra el beneficio del post
+  const actionPrompt = `LinkedIn post about: "${topic}"
+Post: "${postText.slice(0, 150)}"
 
-Fill in exactly 3 lines. Be concrete. Think of a mundane business moment that SHOWS (not symbolizes) what the post is about.
+What is ONE physical, real-world action a professional person would do that REPRESENTS the benefit of this post?
+The action must use ONLY physical objects: paper, pen, whiteboard, notebook, coffee mug, printed documents, books.
+NEVER use: laptop, phone, screen, computer, keyboard, digital, AI, data, virtual.
 
-PERSON: [job title] [gender] [age range] [specific clothing item]
-ACTION: [physical verb] [specific physical object]
-SETTING: [room type], [one furniture item], [one other detail]
+Example for "AI productivity": "signing off on a finished project document, smiling"
+Example for "leadership": "pointing at a section of a printed roadmap on a table"
+Example for "sales": "drawing an upward arrow on a whiteboard with a marker"
 
-Critical rules:
-- No laptops, phones, or visible screens
-- No abstract objects (no lightbulbs, brains, networks, gears, globes)
-- Just ordinary office reality that any photographer could capture
-- The ACTION must be directly related to the post topic
+Answer with ONLY the action in 5-10 words. No explanation.`;
 
-Examples:
-Topic "sales strategy" → PERSON: sales manager, man, 40s, navy blazer | ACTION: drawing a funnel diagram on a whiteboard | SETTING: glass-walled meeting room, long table, water glasses
-Topic "remote work" → PERSON: freelancer, woman, 30s, oversized grey sweater | ACTION: writing in a notebook with coffee cup beside her | SETTING: home office corner, wooden desk, bookshelf
+  const action = (await callGeminiText(actionPrompt)).trim().slice(0, 120);
 
-Output ONLY the 3 lines starting with PERSON:, ACTION:, SETTING:`;
-
-  const raw = (await callGeminiText(slotPrompt)).trim();
-
-  const person  = raw.match(/PERSON:\s*(.+)/i)?.[1]?.trim()  ?? "business professional, gender-neutral, 35, smart casual attire";
-  const action  = raw.match(/ACTION:\s*(.+)/i)?.[1]?.trim()  ?? "reviewing a printed report with a pen in hand";
-  const setting = raw.match(/SETTING:\s*(.+)/i)?.[1]?.trim() ?? "bright modern office, wooden desk, window with soft light";
-
-  // Construir el prompt final — todos los modificadores de foto los ponemos nosotros
+  // Construimos el prompt completo nosotros — modelo de texto NO toca el estilo
   return (
-    `Realistic photograph of a ${person}, ${action}, ${setting}. ` +
-    `Soft natural window light from the side, warm neutral tones. ` +
-    `Fujifilm GFX 100S, 55mm f/2.8, medium format, ISO 200, very slight film grain. ` +
-    `Subject in sharp focus, background gently blurred. ` +
-    `Candid, unposed moment. Magazine editorial style. ` +
-    `IMPORTANT: real photograph, NOT illustration, NOT digital art, NOT cartoon, NOT concept art. ` +
-    `Zero glowing effects, zero holograms, zero floating UI, zero neon, zero circuit patterns, zero sci-fi elements, zero text overlays.`
+    `Hyperrealistic DSLR photograph. ` +
+    `A professional person in their late 30s wearing a plain blazer, ${action}, ` +
+    `inside a minimalist modern office with large windows, wooden furniture, soft plants. ` +
+    `Warm natural afternoon light streaming from the left. ` +
+    `Captured on Canon EOS R5, 85mm f/1.4 lens, ISO 320, shallow depth of field, ` +
+    `bokeh background, skin texture visible, photojournalism style. ` +
+    `Color grading: warm tones, slightly desaturated, clean whites. ` +
+    `The person looks calm and focused. ` +
+    `Style: real photograph as it would appear in Forbes or Harvard Business Review. ` +
+    `STRICT: no illustration, no painting, no digital art, no cartoon, no 3D render, ` +
+    `no neon colors, no glowing elements, no holographic interfaces, no floating text, ` +
+    `no circuit boards, no sci-fi elements, no blue-purple gradients, no dark dramatic lighting. ` +
+    `Background is a real physical office space, not abstract.`
   );
 }
 
