@@ -27,8 +27,31 @@ Write a short helpful professional reply under 400 characters. Output only the r
   return (await callGeminiText(prompt)).slice(0, 400);
 }
 
-export async function generatePost(topic: string): Promise<{ text: string; imageDescription?: string }> {
-  const prompt = `Generate a professional LinkedIn post about: ${topic}.
+export type BrainContext = {
+  company_name?: string;
+  description?:  string;
+  products?:     string;
+  audience?:     string;
+  tone?:         string;
+  value_prop?:   string;
+  keywords?:     string;
+  extra?:        string;
+};
+
+export async function generatePost(topic: string, brain?: BrainContext | null): Promise<{ text: string; imageDescription?: string }> {
+  const brainBlock = brain
+    ? `\nBusiness context (use this to personalize the post):\n` +
+      (brain.company_name ? `- Company: ${brain.company_name}\n` : "") +
+      (brain.description  ? `- What we do: ${brain.description}\n` : "") +
+      (brain.products     ? `- Products/services: ${brain.products}\n` : "") +
+      (brain.audience     ? `- Target audience: ${brain.audience}\n` : "") +
+      (brain.tone         ? `- Tone/voice: ${brain.tone}\n` : "") +
+      (brain.value_prop   ? `- Value proposition: ${brain.value_prop}\n` : "") +
+      (brain.keywords     ? `- Keywords/hashtags: ${brain.keywords}\n` : "") +
+      (brain.extra        ? `- Extra context: ${brain.extra}\n` : "")
+    : "";
+
+  const prompt = `Generate a professional LinkedIn post about: ${topic}.${brainBlock}
 Tone: thought leadership, educational, engaging.
 Return JSON only (no markdown fences):
 {

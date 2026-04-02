@@ -14,7 +14,7 @@ export default function ContentHubPage() {
         </p>
       </div>
 
-      <div className="grid min-h-0 flex-1 grid-cols-1 gap-3 sm:grid-cols-2 sm:gap-4">
+      <div className="grid min-h-0 flex-1 grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3 sm:gap-4">
         <Link
           href="/dashboard/content/posts"
           className="group card flex min-h-0 flex-1 flex-col justify-between overflow-hidden p-5 transition-[border-color,box-shadow,transform] hover:-translate-y-0.5 hover:border-[color-mix(in_srgb,var(--accent)_28%,var(--border))] hover:shadow-[var(--shadow-md)] sm:p-6"
@@ -37,6 +37,27 @@ export default function ContentHubPage() {
             </p>
           </div>
           <span className="mt-3 shrink-0 text-sm font-semibold text-[var(--accent)] sm:mt-4 sm:text-base">Entrar →</span>
+        </Link>
+
+        <Link
+          href="/dashboard/content/brain"
+          className="group card flex min-h-0 flex-1 flex-col justify-between overflow-hidden p-5 transition-[border-color,box-shadow,transform] hover:-translate-y-0.5 hover:border-[color-mix(in_srgb,var(--accent)_28%,var(--border))] hover:shadow-[var(--shadow-md)] sm:p-6"
+        >
+          <div className="min-h-0">
+            <div className="mb-4 flex h-12 w-12 shrink-0 items-center justify-center rounded-[var(--radius-lg)] bg-[color-mix(in_srgb,var(--accent)_16%,var(--surface))] text-[var(--accent)] sm:h-14 sm:w-14">
+              <svg className="h-6 w-6 sm:h-7 sm:w-7" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.75} strokeLinecap="round" strokeLinejoin="round">
+                <path d="M9.5 2A2.5 2.5 0 0 1 12 4.5v15a2.5 2.5 0 0 1-4.96-.46 2.5 2.5 0 0 1-2.96-3.08 3 3 0 0 1-.34-5.58 2.5 2.5 0 0 1 1.32-4.24 2.5 2.5 0 0 1 1.98-3A2.5 2.5 0 0 1 9.5 2Z" />
+                <path d="M14.5 2A2.5 2.5 0 0 0 12 4.5v15a2.5 2.5 0 0 0 4.96-.46 2.5 2.5 0 0 0 2.96-3.08 3 3 0 0 0 .34-5.58 2.5 2.5 0 0 0-1.32-4.24 2.5 2.5 0 0 0-1.98-3A2.5 2.5 0 0 0 14.5 2Z" />
+              </svg>
+            </div>
+            <h2 className="text-xl font-semibold tracking-tight text-[var(--text)] group-hover:text-[var(--accent)] sm:text-2xl">
+              Cerebro
+            </h2>
+            <p className="mt-2 line-clamp-3 max-w-md text-sm leading-snug text-[var(--muted)] sm:mt-3 sm:text-base sm:leading-relaxed">
+              Contexto del negocio: empresa, audiencia, tono y propuesta de valor. La IA lo usa para personalizar cada post.
+            </p>
+          </div>
+          <span className="mt-3 shrink-0 text-sm font-semibold text-[var(--accent)] sm:mt-4 sm:text-base">Configurar →</span>
         </Link>
 
         <Link

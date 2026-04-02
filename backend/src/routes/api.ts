@@ -7,7 +7,7 @@ import {
   filterLeadIdsSkipContactedOtherCampaigns,
   scheduleEnrollmentStep,
 } from "../services/campaignEngine.js";
-import { generateImageBytes, generateIllustrationBrief, generatePost } from "../services/gemini.js";
+import { generateImageBytes, generateIllustrationBrief, generatePost, type BrainContext } from "../services/gemini.js";
 import { pickProxyForAccount } from "../services/proxyAssign.js";
 import { enqueueTask } from "../services/taskQueue.js";
 
@@ -1319,6 +1319,38 @@ export async function registerApiRoutes(app: FastifyInstance) {
     return { ok: true };
   });
 
+  // ─── Brain context ────────────────────────────────────────────────────────
+  app.get("/brain", async (req) => {
+    const { data } = await sb
+      .from("brain_context")
+      .select("*")
+      .eq("user_id", req.userId!)
+      .maybeSingle();
+    return { brain: data ?? null };
+  });
+
+  app.patch("/brain", async (req, reply) => {
+    const schema = z.object({
+      company_name: z.string().optional(),
+      description:  z.string().optional(),
+      products:     z.string().optional(),
+      audience:     z.string().optional(),
+      tone:         z.string().optional(),
+      value_prop:   z.string().optional(),
+      keywords:     z.string().optional(),
+      extra:        z.string().optional(),
+    });
+    const body = schema.parse(req.body ?? {});
+    const { data, error } = await sb
+      .from("brain_context")
+      .upsert({ ...body, user_id: req.userId!, updated_at: new Date().toISOString() }, { onConflict: "user_id" })
+      .select("*")
+      .single();
+    if (error) return reply.status(400).send({ error: error.message });
+    return { brain: data };
+  });
+
+  // ─── Posts ────────────────────────────────────────────────────────────────
   app.get("/posts", async (req) => {
     const { data: accounts } = await sb.from("linkedin_accounts").select("id").eq("user_id", req.userId!);
     const ids = accounts?.map((a) => a.id) ?? [];
@@ -1408,7 +1440,8 @@ export async function registerApiRoutes(app: FastifyInstance) {
     const body = schema.parse(req.body);
     if (!process.env.GEMINI_API_KEY) return reply.status(503).send({ error: "GEMINI_API_KEY not configured" });
 
-    const { text } = await generatePost(body.topic);
+    const { data: brainRow } = await sb.from("brain_context").select("*").eq("user_id", req.userId!).maybeSingle();
+    const { text } = await generatePost(body.topic, brainRow);
     let image_url: string | null = null;
     if (body.with_image) {
       const brief = await generateIllustrationBrief(body.topic, text);
