@@ -122,17 +122,40 @@ export function FloatingDashboardNav({ onLogout }: FloatingDashboardNavProps) {
 
           <span className="hidden h-6 w-px shrink-0 bg-[var(--border)] sm:block" aria-hidden />
 
-          <div className="hidden min-w-0 flex-1 items-center justify-center gap-0.5 md:flex lg:gap-1">
+          {/* Desktop: todos los items — solo desde xl para que quepan los 7 */}
+          <div className="hidden min-w-0 flex-1 items-center justify-center gap-0.5 xl:flex">
             {nav.map((item) => {
               const active = item.match(path);
               return (
-                <Link key={item.href} href={item.href} className={`${navLinkBase} ${active ? navLinkActive : navLinkIdle}`}>
+                <Link key={item.href} href={item.href} className={`${navLinkBase} px-2.5 text-[13px] ${active ? navLinkActive : navLinkIdle}`}>
                   {item.label}
                 </Link>
               );
             })}
           </div>
 
+          {/* Tablet (md–xl): primeros 5 items + "Más" dropdown para los restantes */}
+          <div className="hidden min-w-0 flex-1 items-center justify-center gap-0.5 md:flex xl:hidden">
+            {nav.slice(0, 5).map((item) => {
+              const active = item.match(path);
+              return (
+                <Link key={item.href} href={item.href} className={`${navLinkBase} px-2.5 text-[13px] ${active ? navLinkActive : navLinkIdle}`}>
+                  {item.label}
+                </Link>
+              );
+            })}
+            <button
+              type="button"
+              aria-expanded={moreNavOpen}
+              aria-haspopup="menu"
+              onClick={() => setMoreNavOpen((o) => !o)}
+              className={`${navLinkBase} px-2.5 text-[13px] ${moreNavOpen || nav.slice(5).some((i) => i.match(path)) ? navLinkActive : navLinkIdle}`}
+            >
+              Más
+            </button>
+          </div>
+
+          {/* Mobile: primeros 3 + "Más" */}
           <div
             className="flex min-w-0 flex-1 items-center gap-0.5 overflow-x-auto md:hidden [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
           >
@@ -275,17 +298,19 @@ export function FloatingDashboardNav({ onLogout }: FloatingDashboardNavProps) {
             className="popover-panel absolute top-full z-50 mt-2 w-[min(calc(100vw-1.5rem),22rem)] py-2"
           >
             <p className="px-3 pb-1 pt-0.5 text-[10px] font-semibold uppercase tracking-wider text-[var(--muted)]">Navegación</p>
-            {secondaryNav.map((item) => {
+            {/* Móvil (<md): items 3-6 | Tablet (md-xl): solo items 5-6 | xl+: no se muestra el dropdown */}
+            {nav.map((item, idx) => {
               const active = item.match(path);
+              // En móvil mostrar desde idx 3; en tablet desde idx 5
               return (
                 <Link
                   key={item.href}
                   href={item.href}
                   role="menuitem"
                   onClick={() => setMoreNavOpen(false)}
-                  className={`link-focus mx-1 block rounded-[var(--radius-md)] px-3 py-2.5 text-sm ${
-                    active ? navLinkActive : "text-[var(--text)] hover:bg-[color-mix(in_srgb,var(--text)_6%,transparent)]"
-                  }`}
+                  className={`link-focus mx-1 rounded-[var(--radius-md)] px-3 py-2.5 text-sm ${
+                    idx < 3 ? "hidden" : idx < 5 ? "block md:hidden" : "block xl:hidden"
+                  } ${active ? navLinkActive : "text-[var(--text)] hover:bg-[color-mix(in_srgb,var(--text)_6%,transparent)]"}`}
                 >
                   {item.label}
                 </Link>
