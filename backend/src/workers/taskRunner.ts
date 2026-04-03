@@ -2119,8 +2119,13 @@ function proxyServer(row: { host: string; port: number }): string {
  * La comprobación es en UTC; ajusta con AUTOMATION_WORK_HOURS_UTC_OFFSET si el equipo está en otra zona.
  */
 function isWithinWorkingHours(): boolean {
-  const startH = parseInt(process.env.AUTOMATION_WORK_HOURS_START ?? "7",  10);
-  const endH   = parseInt(process.env.AUTOMATION_WORK_HOURS_END   ?? "21", 10);
+  // Solo activo si el usuario define explícitamente AUTOMATION_WORK_HOURS_START en el .env.
+  // Sin esa variable, siempre devuelve true (sin restricción de horario).
+  const startEnv = process.env.AUTOMATION_WORK_HOURS_START;
+  const endEnv   = process.env.AUTOMATION_WORK_HOURS_END;
+  if (!startEnv || !endEnv) return true; // opt-in: sin configurar = sin límite horario
+  const startH = parseInt(startEnv, 10);
+  const endH   = parseInt(endEnv,   10);
   const offsetH = parseFloat(process.env.AUTOMATION_WORK_HOURS_UTC_OFFSET ?? "0");
   if (!Number.isFinite(startH) || !Number.isFinite(endH)) return true;
   const nowH = (new Date().getUTCHours() + offsetH + 24) % 24;

@@ -369,8 +369,9 @@ export async function setAccountCooldown(
   minSec?: number,
   maxSec?: number
 ): Promise<number> {
-  const envMin = parseInt(process.env.ACCOUNT_COOLDOWN_MIN_SEC ?? "180", 10);
-  const envMax = parseInt(process.env.ACCOUNT_COOLDOWN_MAX_SEC ?? "480", 10);
+  // Sin ACCOUNT_COOLDOWN_MIN_SEC en .env el cooldown es 0 (desactivado por defecto).
+  const envMin = parseInt(process.env.ACCOUNT_COOLDOWN_MIN_SEC ?? "0", 10);
+  const envMax = parseInt(process.env.ACCOUNT_COOLDOWN_MAX_SEC ?? "0", 10);
   const lo = Number.isFinite(minSec) ? (minSec as number) : envMin;
   const hi = Number.isFinite(maxSec) ? (maxSec as number) : envMax;
   const ttlSec = Math.max(30, Math.floor(lo + Math.random() * Math.max(0, hi - lo)));
