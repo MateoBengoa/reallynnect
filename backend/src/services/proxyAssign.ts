@@ -121,7 +121,7 @@ export async function syncWebshareProxies(
         .from("proxies")
         .update({
           host: p.proxy_address,
-          port: p.ports.http,
+          port: p.port,
           username: p.username,
           password: passwordEncrypted,
           status: "active",
@@ -132,7 +132,7 @@ export async function syncWebshareProxies(
       await sb.from("proxies").insert({
         user_id: userId ?? null,
         host: p.proxy_address,
-        port: p.ports.http,
+        port: p.port,
         username: p.username,
         password: passwordEncrypted,
         status: "active",

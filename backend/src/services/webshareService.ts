@@ -8,7 +8,7 @@ export type WebshareProxy = {
   username: string;
   password: string;
   proxy_address: string;
-  ports: { http: number; socks5: number };
+  port: number;
   valid: boolean;
   country_code: string | null;
 };
