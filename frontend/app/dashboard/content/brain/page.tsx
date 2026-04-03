@@ -80,6 +80,8 @@ export default function BrainPage() {
   const [uploading, setUploading]     = useState(false);
   const [uploadErr, setUploadErr]     = useState<string | null>(null);
   const [deletingId, setDeletingId]   = useState<string | null>(null);
+  const [editingLabel, setEditingLabel] = useState<Record<string, string>>({});
+  const [savingLabel, setSavingLabel]   = useState<string | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
 
   const load = useCallback(async () => {
@@ -153,6 +155,18 @@ export default function BrainPage() {
       setPhotos((prev) => prev.filter((p) => p.id !== id));
     } finally {
       setDeletingId(null);
+    }
+  }
+
+  async function saveLabel(id: string) {
+    const label = editingLabel[id] ?? "";
+    setSavingLabel(id);
+    try {
+      if (!(await getValidAccessToken())) return;
+      await api(`/brain/photos/${id}`, { method: "PATCH", body: JSON.stringify({ label }) });
+      setPhotos((prev) => prev.map((p) => p.id === id ? { ...p, label } : p));
+    } finally {
+      setSavingLabel(null);
     }
   }
 
@@ -353,28 +367,63 @@ export default function BrainPage() {
                 <span className="text-xs opacity-60">JPG, PNG, WEBP — máx. 8 MB</span>
               </button>
             ) : (
-              <div className="grid grid-cols-3 gap-3 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-6">
-                {photos.map((p) => (
-                  <div key={p.id} className="group relative aspect-square overflow-hidden rounded-[var(--radius-md)] border border-[var(--border)]">
-                    <img src={p.url} alt="" className="h-full w-full object-cover" />
-                    <button
-                      type="button"
-                      disabled={deletingId === p.id}
-                      onClick={() => void deletePhoto(p.id)}
-                      className="absolute inset-0 flex items-center justify-center bg-black/60 opacity-0 transition-opacity group-hover:opacity-100 disabled:opacity-100"
-                    >
-                      {deletingId === p.id ? (
-                        <svg className="h-5 w-5 animate-spin text-white" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.5}>
-                          <path strokeLinecap="round" d="M12 2a10 10 0 0 1 10 10" />
-                        </svg>
-                      ) : (
-                        <svg className="h-5 w-5 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                          <path strokeLinecap="round" strokeLinejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-                        </svg>
+              <div className="space-y-3">
+                <p className="text-[11px] text-[var(--muted)]">
+                  Describí cada foto para que la IA decida si usar una imagen real o generar una con IA.
+                </p>
+                {photos.map((p) => {
+                  const labelVal = editingLabel[p.id] ?? p.label ?? "";
+                  const isDirty = labelVal !== (p.label ?? "");
+                  return (
+                    <div key={p.id} className="flex items-start gap-3 rounded-[var(--radius-md)] border border-[var(--border)] bg-[color-mix(in_srgb,var(--text)_2%,var(--surface))] p-3">
+                      {/* Thumbnail */}
+                      <div className="group relative h-16 w-16 shrink-0 overflow-hidden rounded-[var(--radius-md)] border border-[var(--border)]">
+                        <img src={p.url} alt="" className="h-full w-full object-cover" />
+                        <button
+                          type="button"
+                          disabled={deletingId === p.id}
+                          onClick={() => void deletePhoto(p.id)}
+                          className="absolute inset-0 flex items-center justify-center bg-black/60 opacity-0 transition-opacity group-hover:opacity-100 disabled:opacity-100"
+                        >
+                          {deletingId === p.id ? (
+                            <svg className="h-4 w-4 animate-spin text-white" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.5}>
+                              <path strokeLinecap="round" d="M12 2a10 10 0 0 1 10 10" />
+                            </svg>
+                          ) : (
+                            <svg className="h-4 w-4 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                              <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+                            </svg>
+                          )}
+                        </button>
+                      </div>
+
+                      {/* Label + guardar */}
+                      <div className="min-w-0 flex-1 space-y-1.5">
+                        <input
+                          className="input-field py-1.5 text-sm"
+                          placeholder="Ej: Foto de perfil profesional · En conferencia hablando · Equipo en oficina"
+                          value={labelVal}
+                          onChange={(e) => setEditingLabel((prev) => ({ ...prev, [p.id]: e.target.value }))}
+                          onKeyDown={(e) => { if (e.key === "Enter") void saveLabel(p.id); }}
+                        />
+                        <p className="text-[10px] text-[var(--muted)]">
+                          La IA usará este contexto para decidir si es mejor esta foto o generar una imagen.
+                        </p>
+                      </div>
+
+                      {isDirty && (
+                        <button
+                          type="button"
+                          disabled={savingLabel === p.id}
+                          onClick={() => void saveLabel(p.id)}
+                          className="btn-primary shrink-0 px-3 py-1.5 text-xs disabled:opacity-50"
+                        >
+                          {savingLabel === p.id ? "…" : "Guardar"}
+                        </button>
                       )}
-                    </button>
-                  </div>
-                ))}
+                    </div>
+                  );
+                })}
               </div>
             )}
           </div>

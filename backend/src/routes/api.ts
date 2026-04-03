@@ -7,7 +7,7 @@ import {
   filterLeadIdsSkipContactedOtherCampaigns,
   scheduleEnrollmentStep,
 } from "../services/campaignEngine.js";
-import { generateImageBytes, generateIllustrationBrief, generatePost, type BrainContext } from "../services/gemini.js";
+import { generateImageBytes, generateIllustrationBrief, generatePost, type BrainContext, type PhotoContext } from "../services/gemini.js";
 import { pickProxyForAccount, syncWebshareProxies, autoAssignProxiesToAccounts } from "../services/proxyAssign.js";
 import { enqueueTask } from "../services/taskQueue.js";
 
@@ -1527,6 +1527,17 @@ export async function registerApiRoutes(app: FastifyInstance) {
     return { photos: data ?? [] };
   });
 
+  // Actualizar contexto/label de una foto
+  app.patch("/brain/photos/:id", async (req, reply) => {
+    const id = (req.params as { id: string }).id;
+    const { label } = (req.body ?? {}) as { label?: string };
+    if (typeof label !== "string") return reply.status(400).send({ error: "label requerido" });
+    const { data: photo } = await sb.from("brain_photos").select("id").eq("id", id).eq("user_id", req.userId!).maybeSingle();
+    if (!photo) return reply.status(404).send({ error: "Not found" });
+    await sb.from("brain_photos").update({ label: label.trim() }).eq("id", id);
+    return { ok: true };
+  });
+
   // Eliminar foto
   app.delete("/brain/photos/:id", async (req, reply) => {
     const id = (req.params as { id: string }).id;
@@ -1627,10 +1638,15 @@ export async function registerApiRoutes(app: FastifyInstance) {
     const body = schema.parse(req.body);
     if (!process.env.GEMINI_API_KEY) return reply.status(503).send({ error: "GEMINI_API_KEY not configured" });
 
-    const { data: brainRow } = await sb.from("brain_context").select("*").eq("user_id", req.userId!).maybeSingle();
-    const { text } = await generatePost(body.topic, brainRow);
+    const [{ data: brainRow }, { data: photoRows }] = await Promise.all([
+      sb.from("brain_context").select("*").eq("user_id", req.userId!).maybeSingle(),
+      sb.from("brain_photos").select("label,url").eq("user_id", req.userId!).order("created_at", { ascending: false }),
+    ]);
+    const photos: PhotoContext[] = (photoRows ?? []).map((p) => ({ label: (p.label as string) || "", url: p.url as string }));
+    const { text, useRealPhoto, suggestedPhotoContext } = await generatePost(body.topic, brainRow, photos);
     let image_url: string | null = null;
-    if (body.with_image) {
+    let suggested_photo_context: string | null = suggestedPhotoContext ?? null;
+    if (body.with_image && !useRealPhoto) {
       const brief = await generateIllustrationBrief(body.topic, text);
       const bytes = await generateImageBytes(brief);
       if (bytes) image_url = `data:image/png;base64,${bytes.toString("base64")}`;
@@ -1646,11 +1662,12 @@ export async function registerApiRoutes(app: FastifyInstance) {
         content: text,
         image_url,
         status: "draft",
+        suggested_photo_context,
       })
       .select("*")
       .single();
     if (error) return reply.status(400).send({ error: error.message });
-    return { post };
+    return { post, useRealPhoto, suggestedPhotoContext };
   });
 
   // Regenerar / generar una nueva imagen para un post existente

@@ -42,7 +42,13 @@ export type BrainContext = {
   personal_story?: string;
 };
 
-export async function generatePost(topic: string, brain?: BrainContext | null): Promise<{ text: string; imageDescription?: string }> {
+export type PhotoContext = { label: string; url: string };
+
+export async function generatePost(
+  topic: string,
+  brain?: BrainContext | null,
+  photos?: PhotoContext[]
+): Promise<{ text: string; imageDescription?: string; useRealPhoto: boolean; suggestedPhotoContext?: string }> {
   const isPersonal = brain?.brand_type === "personal";
   const brainBlock = brain
     ? isPersonal
@@ -66,22 +72,41 @@ export async function generatePost(topic: string, brain?: BrainContext | null): 
         (brain.extra        ? `- Extra context: ${brain.extra}\n` : "")
     : "";
 
-  const prompt = `Generate a professional LinkedIn post about: ${topic}.${brainBlock}
+  const photosBlock = photos && photos.length > 0
+    ? `\nAvailable real photos (uploaded by the author):\n` +
+      photos.map((p, i) => `${i + 1}. "${p.label || "Sin descripción"}"`).join("\n") +
+      `\n`
+    : "";
+
+  const prompt = `Generate a professional LinkedIn post about: ${topic}.${brainBlock}${photosBlock}
 Tone: thought leadership, educational, engaging.
+${photos && photos.length > 0
+  ? `If the post would benefit from a real photo (e.g. personal story, showing a moment, building trust), set useRealPhoto to true and suggestedPhotoContext to the photo description from the list above that fits best. If the post is better with an AI-generated image (e.g. infographic, concept, abstract idea), set useRealPhoto to false.`
+  : `Set useRealPhoto to false (no real photos available).`
+}
 Return JSON only (no markdown fences):
 {
   "post": "the full post text",
-  "imageDescription": "A short visual concept for the post. Choose ONE of these styles: (A) Real-world photo of 1-2 professionals in a modern office/meeting, (B) Clean modern digital art or infographic with a professional color palette, (C) A clean diagram or flowchart. NEVER use: neon glows, holographic UI, sci-fi circuits, comic/cartoon characters, or overly saturated blue-purple futuristic palettes."
+  "imageDescription": "Only if useRealPhoto is false: a short visual concept for an AI-generated image. Real-world photo style, professional, NO neon/sci-fi/holographic elements.",
+  "useRealPhoto": true or false,
+  "suggestedPhotoContext": "Only if useRealPhoto is true: the exact label of the photo to use"
 }`;
   const raw = await callGeminiText(prompt);
   try {
     const j = JSON.parse(raw.replace(/^```json\s*|\s*```$/g, "")) as {
       post?: string;
       imageDescription?: string;
+      useRealPhoto?: boolean;
+      suggestedPhotoContext?: string;
     };
-    return { text: j.post ?? raw, imageDescription: j.imageDescription };
+    return {
+      text: j.post ?? raw,
+      imageDescription: j.useRealPhoto ? undefined : j.imageDescription,
+      useRealPhoto: j.useRealPhoto ?? false,
+      suggestedPhotoContext: j.useRealPhoto ? j.suggestedPhotoContext : undefined,
+    };
   } catch {
-    return { text: raw.slice(0, 3000) };
+    return { text: raw.slice(0, 3000), useRealPhoto: false };
   }
 }
 
