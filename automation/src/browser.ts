@@ -219,8 +219,19 @@ export async function injectLiAt(page: Page, cookieValue: string): Promise<void>
     },
   ]);
 
-  // Navigate directly to feed (authenticated)
-  await page.goto("https://www.linkedin.com/feed/", { waitUntil: "domcontentloaded", timeout: 60000 });
+  // Navigate directly to feed (authenticated).
+  // Usamos "load" con timeout generoso; si LinkedIn va lento pero la cookie está
+  // inyectada la sesión sigue siendo válida aunque el timeout se dispare.
+  try {
+    await page.goto("https://www.linkedin.com/feed/", { waitUntil: "domcontentloaded", timeout: 90000 });
+  } catch {
+    // Si la página no termina de cargar, verificamos que al menos llegamos a LinkedIn
+    const url = page.url();
+    if (!url.includes("linkedin.com")) {
+      throw new Error(`injectLiAt: navegación fallida — URL actual: ${url}`);
+    }
+    // Cookie ya está inyectada; el resto del flujo puede continuar
+  }
 }
 
 export async function closeSession(browser: Browser): Promise<void> {
