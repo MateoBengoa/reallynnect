@@ -2438,6 +2438,15 @@ export async function runOneTask(sb: SupabaseClient, redis: RedisClient, taskId:
     }
 
     if (action === "follow") {
+      const cap = await checkUnderDailyCap(redis, accountId, "connect", accountDailyCap(account, "connect"));
+      if (!cap.ok) {
+        const tomorrow = new Date();
+        tomorrow.setUTCDate(tomorrow.getUTCDate() + 1);
+        tomorrow.setUTCHours(7, 0, 0, 0);
+        await sb.from("tasks").update({ status: "pending", scheduled_at: tomorrow.toISOString(), attempts: Math.max(0, (task.attempts as number) - 1) }).eq("id", taskId);
+        await enqueueTaskDue(redis, taskId, tomorrow.getTime());
+        return;
+      }
       const profileUrl = String(payload.profile_url ?? "");
       const r = await followProfile(page, profileUrl);
       if (r.softban) {
@@ -2449,11 +2458,21 @@ export async function runOneTask(sb: SupabaseClient, redis: RedisClient, taskId:
         await fail(r.error ?? "follow_failed");
         return;
       }
+      await incrementDailyCount(redis, accountId, "connect", accountDailyCap(account, "connect"));
       await afterSuccess();
       return;
     }
 
     if (action === "like_post") {
+      const cap = await checkUnderDailyCap(redis, accountId, "visit", accountDailyCap(account, "visit"));
+      if (!cap.ok) {
+        const tomorrow = new Date();
+        tomorrow.setUTCDate(tomorrow.getUTCDate() + 1);
+        tomorrow.setUTCHours(6, 0, 0, 0);
+        await sb.from("tasks").update({ status: "pending", scheduled_at: tomorrow.toISOString(), attempts: Math.max(0, (task.attempts as number) - 1) }).eq("id", taskId);
+        await enqueueTaskDue(redis, taskId, tomorrow.getTime());
+        return;
+      }
       const profileUrl = String(payload.profile_url ?? "");
       const r = await likeLeadRecentPost(page, profileUrl);
       if (r.softban) {
@@ -2465,28 +2484,36 @@ export async function runOneTask(sb: SupabaseClient, redis: RedisClient, taskId:
         await fail(r.error ?? "like_failed");
         return;
       }
+      await incrementDailyCount(redis, accountId, "visit", accountDailyCap(account, "visit"));
       await afterSuccess();
       return;
     }
 
     if (action === "comment_post") {
+      const cap = await checkUnderDailyCap(redis, accountId, "message", accountDailyCap(account, "message"));
+      if (!cap.ok) {
+        const tomorrow = new Date();
+        tomorrow.setUTCDate(tomorrow.getUTCDate() + 1);
+        tomorrow.setUTCHours(8, 0, 0, 0);
+        await sb.from("tasks").update({ status: "pending", scheduled_at: tomorrow.toISOString(), attempts: Math.max(0, (task.attempts as number) - 1) }).eq("id", taskId);
+        await enqueueTaskDue(redis, taskId, tomorrow.getTime());
+        return;
+      }
       const profileUrl = String(payload.profile_url ?? "");
       const tmpl = (payload.message_template as string | undefined) ?? "";
-      const text = tmpl
+      let commentText = tmpl
         .replace(/\{name\}/gi, String(payload.lead_name ?? ""))
         .replace(/\{company\}/gi, String(payload.lead_company ?? ""))
         .trim();
-      const body =
-        text ||
-        (process.env.GEMINI_API_KEY
-          ? await generateConnectionMessage({
-              name: payload.lead_name as string,
-              company: payload.lead_company as string,
-              title: payload.lead_title as string,
-              objective: "short friendly comment on their post",
-            })
-          : "👍");
-      const r = await commentLeadRecentPost(page, profileUrl, body.slice(0, 3000));
+      if (!commentText) {
+        commentText = process.env.GEMINI_API_KEY
+          ? await generateDmReply(
+              String(payload.lead_name ?? "post"),
+              `Comment on post by ${payload.lead_name ?? ""} from ${payload.lead_company ?? ""}`
+            )
+          : "👍 Great post!";
+      }
+      const r = await commentLeadRecentPost(page, profileUrl, commentText.slice(0, 3000));
       if (r.softban) {
         await pauseAccountSoftban(sb, accountId);
         await fail("softban");
@@ -2496,6 +2523,7 @@ export async function runOneTask(sb: SupabaseClient, redis: RedisClient, taskId:
         await fail(r.error ?? "comment_failed");
         return;
       }
+      await incrementDailyCount(redis, accountId, "message", accountDailyCap(account, "message"));
       await afterSuccess();
       return;
     }
@@ -2697,21 +2725,29 @@ export async function runOneTask(sb: SupabaseClient, redis: RedisClient, taskId:
     }
 
     if (action === "reply_comment") {
+      const cap = await checkUnderDailyCap(redis, accountId, "message", accountDailyCap(account, "message"));
+      if (!cap.ok) {
+        const tomorrow = new Date();
+        tomorrow.setUTCDate(tomorrow.getUTCDate() + 1);
+        tomorrow.setUTCHours(8, 0, 0, 0);
+        await sb.from("tasks").update({ status: "pending", scheduled_at: tomorrow.toISOString(), attempts: Math.max(0, (task.attempts as number) - 1) }).eq("id", taskId);
+        await enqueueTaskDue(redis, taskId, tomorrow.getTime());
+        return;
+      }
       const profileUrl = String(payload.profile_url ?? "");
       const tmpl = (payload.message_template as string | undefined) ?? "";
       let text = tmpl
         .replace(/\{name\}/gi, String(payload.lead_name ?? ""))
         .replace(/\{company\}/gi, String(payload.lead_company ?? ""))
         .trim();
-      if (!text && process.env.GEMINI_API_KEY) {
-        text = await generateConnectionMessage({
-          name: payload.lead_name as string,
-          company: payload.lead_company as string,
-          title: payload.lead_title as string,
-          objective: "short professional reply to their comment",
-        });
+      if (!text) {
+        text = process.env.GEMINI_API_KEY
+          ? await generateDmReply(
+              String(payload.lead_name ?? "comment"),
+              `Reply to comment by ${payload.lead_name ?? ""} from ${payload.lead_company ?? ""}`
+            )
+          : "Thanks for your comment!";
       }
-      if (!text) text = "Thanks for your comment!";
       const r = await replyToCommentOnLeadRecentPost(page, profileUrl, text.slice(0, 3000));
       if (r.softban) {
         await pauseAccountSoftban(sb, accountId);
@@ -2722,6 +2758,7 @@ export async function runOneTask(sb: SupabaseClient, redis: RedisClient, taskId:
         await fail(r.error ?? "reply_comment_failed");
         return;
       }
+      await incrementDailyCount(redis, accountId, "message", accountDailyCap(account, "message"));
       await afterSuccess();
       return;
     }
