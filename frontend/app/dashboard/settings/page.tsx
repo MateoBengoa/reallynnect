@@ -18,6 +18,13 @@ type LinkedAccount = {
   proxy_id: string | null;
 };
 
+type ProxyRow = {
+  id: string;
+  host: string;
+  port: number;
+  account_id: string | null;
+};
+
 
 const sectionTitle = "mb-1 text-lg font-semibold tracking-tight text-[var(--text)]";
 const sectionDesc = "mb-4 text-sm text-[var(--muted)]";
@@ -71,14 +78,17 @@ export default function SettingsPage() {
   const [msg, setMsg] = useState<string | null>(null);
 
   const [accounts, setAccounts] = useState<LinkedAccount[]>([]);
+  const [proxies, setProxies] = useState<ProxyRow[]>([]);
+  const [proxyTestResults, setProxyTestResults] = useState<Record<string, { ok: boolean; ip?: string | null; warn?: string; error?: string } | "loading">>({});
   const [cookieDrafts, setCookieDrafts] = useState<Record<string, string>>({});
   const [proxyDrafts, setProxyDrafts] = useState<Record<string, string>>({});
 
   const load = useCallback(async () => {
     if (!(await getValidAccessToken())) return;
-    const [me, acc] = await Promise.all([
+    const [me, acc, prx] = await Promise.all([
       api<{ profile: Profile | null }>("/me"),
       api<{ accounts: LinkedAccount[] }>("/linkedin-accounts"),
+      api<{ proxies: ProxyRow[] }>("/proxies"),
     ]);
     const p = me.profile;
     setProfile(p);
@@ -92,6 +102,7 @@ export default function SettingsPage() {
       setEvFailed(true);
     }
     setAccounts(acc.accounts);
+    setProxies(prx.proxies ?? []);
     setProxyDrafts((prev) => {
       const next = { ...prev };
       for (const a of acc.accounts) {
@@ -150,6 +161,19 @@ export default function SettingsPage() {
       await load();
     } catch (e: unknown) {
       setMsg(e instanceof Error ? e.message : "Error");
+    }
+  }
+
+  async function testProxy(proxyId: string) {
+    if (!(await getValidAccessToken())) return;
+    setProxyTestResults((r) => ({ ...r, [proxyId]: "loading" }));
+    try {
+      const res = await api<{ ok: boolean; ip?: string | null; warn?: string; error?: string }>(
+        `/proxies/${proxyId}/test`, { method: "POST" }
+      );
+      setProxyTestResults((r) => ({ ...r, [proxyId]: res }));
+    } catch (e) {
+      setProxyTestResults((r) => ({ ...r, [proxyId]: { ok: false, error: e instanceof Error ? e.message : "Error" } }));
     }
   }
 
@@ -249,6 +273,49 @@ export default function SettingsPage() {
         )}
       </section>
 
+
+      {proxies.length > 0 && (
+        <section>
+          <h2 className={sectionTitle}>Verificar proxies</h2>
+          <p className={sectionDesc}>
+            Comprueba que cada proxy es alcanzable y obtiene una IP externa correcta.
+          </p>
+          <ul className="space-y-2">
+            {proxies.map((p) => {
+              const account = accounts.find((a) => a.id === p.account_id);
+              const result = proxyTestResults[p.id];
+              return (
+                <li key={p.id} className="card card-pad flex flex-wrap items-center justify-between gap-3 py-3">
+                  <div className="min-w-0 flex-1">
+                    <p className="font-mono text-sm text-[var(--text)]">{p.host}:{p.port}</p>
+                    {account && (
+                      <p className="text-xs text-[var(--muted)]">→ {account.li_display_name ?? `…${account.id.slice(-6)}`}</p>
+                    )}
+                    {!p.account_id && (
+                      <p className="text-xs text-[var(--muted)]">Sin cuenta asignada</p>
+                    )}
+                    {result && result !== "loading" && (
+                      <p className={`mt-1 text-xs ${result.ok ? "text-green-400" : "text-red-400"}`}>
+                        {result.ok && result.ip && `✓ IP: ${result.ip}`}
+                        {result.ok && !result.ip && result.warn && `⚠ ${result.warn}`}
+                        {!result.ok && `✗ ${result.error}`}
+                      </p>
+                    )}
+                  </div>
+                  <button
+                    type="button"
+                    disabled={result === "loading"}
+                    onClick={() => testProxy(p.id)}
+                    className="btn-secondary min-h-9 shrink-0 text-sm disabled:opacity-50"
+                  >
+                    {result === "loading" ? "Probando…" : "Comprobar"}
+                  </button>
+                </li>
+              );
+            })}
+          </ul>
+        </section>
+      )}
 
       {profile?.email && (
         <p className="text-xs text-[var(--muted)]">

@@ -321,6 +321,68 @@ export async function registerApiRoutes(app: FastifyInstance) {
     return { ok: true };
   });
 
+  // Test de conectividad de un proxy (TCP reach + HTTP a través del proxy)
+  app.post("/proxies/:id/test", async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const { data: row } = await sb
+      .from("proxies")
+      .select("id,host,port,username,password")
+      .eq("id", id)
+      .eq("user_id", req.userId!)
+      .maybeSingle();
+    if (!row) return reply.status(404).send({ error: "not_found" });
+
+    let password: string | null = row.password as string | null;
+    if (password) { try { password = decryptSecret(password); } catch { /* plain */ } }
+
+    const proxyHost = row.host as string;
+    const proxyPort = row.port as number;
+    const username = row.username as string | null;
+
+    const net = await import("node:net");
+    const http = await import("node:http");
+
+    // 1. TCP reachability
+    const tcpOk = await new Promise<boolean>((resolve) => {
+      const sock = net.createConnection({ host: proxyHost, port: proxyPort, timeout: 8000 });
+      sock.once("connect", () => { sock.destroy(); resolve(true); });
+      sock.once("timeout", () => { sock.destroy(); resolve(false); });
+      sock.once("error", () => resolve(false));
+    });
+
+    if (!tcpOk) return { ok: false, error: `No se pudo conectar a ${proxyHost}:${proxyPort}` };
+
+    // 2. HTTP GET a través del proxy (sin CONNECT, HTTP plano a api.ipify.org)
+    try {
+      const externalIp = await new Promise<string>((resolve, reject) => {
+        const headers: Record<string, string> = { Host: "api.ipify.org" };
+        if (username && password) {
+          headers["Proxy-Authorization"] = "Basic " + Buffer.from(`${username}:${password}`).toString("base64");
+        }
+        const r = http.request({
+          host: proxyHost, port: proxyPort,
+          method: "GET",
+          path: "http://api.ipify.org/?format=json",
+          headers,
+          timeout: 10000,
+        }, (res) => {
+          let body = "";
+          res.on("data", (d: Buffer) => (body += d.toString()));
+          res.on("end", () => {
+            try { resolve((JSON.parse(body) as { ip: string }).ip); }
+            catch { resolve("desconocida"); }
+          });
+        });
+        r.once("timeout", () => { r.destroy(); reject(new Error("timeout")); });
+        r.once("error", reject);
+        r.end();
+      });
+      return { ok: true, ip: externalIp };
+    } catch (e) {
+      return { ok: true, ip: null, warn: "TCP OK pero no se pudo obtener IP: " + (e instanceof Error ? e.message : String(e)) };
+    }
+  });
+
   // Crea un proxy propio del usuario (para usar en lugar del de la app)
   app.post("/proxies", async (req, reply) => {
     const body = proxyBody.parse(req.body);
