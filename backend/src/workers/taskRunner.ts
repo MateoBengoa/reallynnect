@@ -2254,17 +2254,21 @@ export async function runOneTask(sb: SupabaseClient, redis: RedisClient, taskId:
     console.error(`[worker] acquireBrowserSlot error (${taskId.slice(0, 8)}):`, slotErr instanceof Error ? slotErr.message : slotErr);
   }
   if (!gotSlot) {
-    const reschedAt = new Date(Date.now() + 15_000).toISOString();
+    // Esperar más tiempo si es tarea de campaña para no ciclar cada 15s
+    const isEnrollment = !!(task.enrollment_id as string | undefined);
+    const waitMs = isEnrollment ? 60_000 : 15_000; // campaña: 1 min; resto: 15s
+    const reschedAt = new Date(Date.now() + waitMs).toISOString();
     await sb
       .from("tasks")
       .update({
         status: "pending",
         scheduled_at: reschedAt,
         attempts: Math.max(0, (task.attempts as number) - 1),
+        error_message: "no_browser_slot",
       })
       .eq("id", taskId)
       .then(undefined, (e: unknown) => console.error("[worker] reschedule no-slot:", e));
-    await enqueueTaskDue(redis, taskId, Date.now() + 15_000).catch(() => {});
+    await enqueueTaskDue(redis, taskId, Date.now() + waitMs).catch(() => {});
     return;
   }
 
