@@ -24,7 +24,6 @@ export default function ProxiesPage() {
   const [list, setList] = useState<Proxy[]>([]);
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [hasKey, setHasKey] = useState(false);
-  const [webshareKey, setWebshareKey] = useState("");
   const [syncMsg, setSyncMsg] = useState<string | null>(null);
   const [syncing, setSyncing] = useState(false);
 
@@ -48,24 +47,20 @@ export default function ProxiesPage() {
     setHasKey(keyRes.has_key);
   }, []);
 
-  useEffect(() => {
-    load();
-  }, [load]);
+  useEffect(() => { load(); }, [load]);
 
-  async function syncWebshare(e: React.FormEvent) {
-    e.preventDefault();
+  async function syncWebshare() {
     setSyncMsg(null);
     setSyncing(true);
     try {
       if (!(await getValidAccessToken())) return;
       const r = await api<{ inserted: number; updated: number; total: number; assigned: number }>(
         "/proxies/sync-webshare",
-        { method: "POST", body: JSON.stringify({ api_key: webshareKey.trim() }) }
+        { method: "POST" }
       );
       setSyncMsg(
-        `Sync completado: ${r.inserted} nuevos, ${r.updated} actualizados, ${r.assigned} asignados a cuentas (de ${r.total} proxies totales).`
+        `Sync completado: ${r.inserted} nuevos, ${r.updated} actualizados, ${r.assigned} asignados a cuentas (${r.total} proxies totales).`
       );
-      setWebshareKey("");
       await load();
     } catch (e2: unknown) {
       setSyncMsg(e2 instanceof Error ? e2.message : "Error al sincronizar");
@@ -79,9 +74,7 @@ export default function ProxiesPage() {
     try {
       await api(`/proxies/${id}`, { method: "DELETE" });
       await load();
-    } catch {
-      /* ignore */
-    }
+    } catch { /* ignore */ }
   }
 
   async function assignProxy(proxyId: string, accountId: string | null) {
@@ -92,9 +85,7 @@ export default function ProxiesPage() {
         body: JSON.stringify({ account_id: accountId }),
       });
       await load();
-    } catch {
-      /* ignore */
-    }
+    } catch { /* ignore */ }
   }
 
   async function addManual(e: React.FormEvent) {
@@ -111,9 +102,7 @@ export default function ProxiesPage() {
           password: password || undefined,
         }),
       });
-      setHost("");
-      setPassword("");
-      setUsername("");
+      setHost(""); setPassword(""); setUsername("");
       setShowManual(false);
       await load();
     } catch (e2: unknown) {
@@ -134,37 +123,43 @@ export default function ProxiesPage() {
     <div>
       <h1 className="page-title mb-1">Proxies</h1>
       <p className="page-desc mb-6">
-        Cada cuenta LinkedIn funciona con su propio proxy residencial estático dedicado. Sincroniza desde{" "}
-        <span className="text-[var(--text)]">Webshare.io</span> y los proxies se asignan automáticamente.
+        Cada cuenta LinkedIn funciona con su propio proxy residencial estático dedicado (1:1).
+        Los proxies se sincronizan desde Webshare.io y se asignan automáticamente.
       </p>
 
       {/* Webshare sync */}
       <section className="card card-pad mb-6 max-w-xl space-y-3">
         <div className="flex items-center justify-between">
           <p className="text-sm font-medium text-[var(--text)]">Sincronizar con Webshare.io</p>
-          {hasKey && (
-            <span className="rounded-full bg-green-500/10 px-2 py-0.5 text-[10px] font-semibold text-green-400">
-              API key guardada
-            </span>
-          )}
+          <span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${
+            hasKey
+              ? "bg-green-500/10 text-green-400"
+              : "bg-amber-500/10 text-amber-400"
+          }`}>
+            {hasKey ? "API key configurada" : "Sin API key en servidor"}
+          </span>
         </div>
-        <form onSubmit={syncWebshare} className="flex gap-2">
-          <input
-            className="input-field flex-1"
-            placeholder={hasKey ? "Nueva API key (vacío = usar guardada)" : "API key de Webshare.io"}
-            value={webshareKey}
-            onChange={(e) => setWebshareKey(e.target.value)}
-          />
-          <button type="submit" disabled={syncing || (!hasKey && !webshareKey.trim())} className="btn-primary shrink-0 disabled:opacity-50">
-            {syncing ? "Sincronizando…" : hasKey && !webshareKey ? "Re-sync" : "Sync"}
-          </button>
-        </form>
-        {syncMsg && (
-          <p className={`text-sm ${syncMsg.startsWith("Sync") ? "text-green-400" : "text-red-400"}`}>{syncMsg}</p>
+
+        <button
+          type="button"
+          disabled={syncing || !hasKey}
+          onClick={syncWebshare}
+          className="btn-primary w-full disabled:opacity-50"
+        >
+          {syncing ? "Sincronizando…" : "Sync desde Webshare"}
+        </button>
+
+        {!hasKey && (
+          <p className="text-xs text-amber-400">
+            Añade <code className="font-mono">WEBSHARE_API_KEY=tu_key</code> al <code>.env</code> del servidor y reinicia.
+          </p>
         )}
-        <p className="text-xs text-[var(--muted)]">
-          La API key se cifra y guarda. Pulsa «Sync» sin rellenarla para re-sincronizar con la key guardada.
-        </p>
+
+        {syncMsg && (
+          <p className={`text-sm ${syncMsg.startsWith("Sync") ? "text-green-400" : "text-red-400"}`}>
+            {syncMsg}
+          </p>
+        )}
       </section>
 
       {/* Stats */}
@@ -201,18 +196,14 @@ export default function ProxiesPage() {
                 </div>
 
                 <div className="flex shrink-0 items-center gap-2">
-                  {/* Status badge */}
-                  <span
-                    className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${
-                      p.status === "active"
-                        ? "bg-green-500/10 text-green-400"
-                        : "bg-amber-500/10 text-amber-400"
-                    }`}
-                  >
+                  <span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${
+                    p.status === "active"
+                      ? "bg-green-500/10 text-green-400"
+                      : "bg-amber-500/10 text-amber-400"
+                  }`}>
                     {p.status}
                   </span>
 
-                  {/* Account assignment */}
                   <select
                     className="input-field h-8 py-0 text-xs"
                     value={p.account_id ?? ""}
@@ -246,11 +237,10 @@ export default function ProxiesPage() {
 
       {list.length === 0 && (
         <div className="mb-6 rounded-xl border border-dashed border-[var(--border)] py-10 text-center text-sm text-[var(--muted)]">
-          Sin proxies. Sincroniza desde Webshare.io o añade uno manualmente.
+          Sin proxies. Haz sync desde Webshare o añade uno manualmente.
         </div>
       )}
 
-      {/* Manual add toggle */}
       <button
         type="button"
         className="btn-secondary text-xs"

@@ -8,7 +8,7 @@ import {
   scheduleEnrollmentStep,
 } from "../services/campaignEngine.js";
 import { generateImageBytes, generateIllustrationBrief, generatePost, type BrainContext } from "../services/gemini.js";
-import { pickProxyForAccount } from "../services/proxyAssign.js";
+import { pickProxyForAccount, syncWebshareProxies, autoAssignProxiesToAccounts } from "../services/proxyAssign.js";
 import { enqueueTask } from "../services/taskQueue.js";
 
 const proxyBody = z.object({
@@ -249,6 +249,76 @@ export async function registerApiRoutes(app: FastifyInstance) {
     const { data, error } = await sb.from("profiles").update(patch).eq("id", req.userId!).select("*").single();
     if (error) return reply.status(400).send({ error: error.message });
     return { profile: data };
+  });
+
+  // Lista proxies del usuario
+  app.get("/proxies", async (req) => {
+    const { data } = await sb
+      .from("proxies")
+      .select("id,host,port,username,status,last_used,account_id,webshare_proxy_id")
+      .eq("user_id", req.userId!)
+      .order("created_at", { ascending: true });
+    return { proxies: data ?? [] };
+  });
+
+  // ¿Está configurada la API key de Webshare en el servidor?
+  app.get("/proxies/webshare-key", async (_req) => {
+    return { has_key: !!process.env.WEBSHARE_API_KEY };
+  });
+
+  // Sincroniza proxies desde Webshare (usa WEBSHARE_API_KEY del .env del servidor)
+  app.post("/proxies/sync-webshare", async (req, reply) => {
+    const apiKey = process.env.WEBSHARE_API_KEY?.trim();
+    if (!apiKey) return reply.status(400).send({ error: "WEBSHARE_API_KEY no configurada en el servidor." });
+
+    try {
+      const result = await syncWebshareProxies(sb, req.userId!, apiKey);
+      const assigned = await autoAssignProxiesToAccounts(sb, req.userId!);
+      return { ...result, assigned };
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      return reply.status(400).send({ error: msg });
+    }
+  });
+
+  // Asigna/desasigna un proxy a una cuenta manualmente
+  app.post("/proxies/:id/assign", async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const body = (req.body ?? {}) as { account_id?: string | null };
+    const accountId = body.account_id || null;
+
+    // Verificar que el proxy pertenece al usuario
+    const { data: proxy } = await sb
+      .from("proxies")
+      .select("id,account_id")
+      .eq("id", id)
+      .eq("user_id", req.userId!)
+      .maybeSingle();
+    if (!proxy) return reply.status(404).send({ error: "not_found" });
+
+    // Desasignar proxy anterior de la cuenta si era otro
+    if (proxy.account_id && proxy.account_id !== accountId) {
+      await sb.from("linkedin_accounts").update({ proxy_id: null }).eq("id", proxy.account_id as string).eq("user_id", req.userId!);
+    }
+
+    // Si se asigna a una cuenta, quitar proxy previo de esa cuenta
+    if (accountId) {
+      const { data: prevProxy } = await sb
+        .from("proxies")
+        .select("id")
+        .eq("account_id", accountId)
+        .eq("user_id", req.userId!)
+        .maybeSingle();
+      if (prevProxy && prevProxy.id !== id) {
+        await sb.from("proxies").update({ account_id: null }).eq("id", prevProxy.id as string);
+      }
+      await sb.from("proxies").update({ account_id: accountId }).eq("id", id);
+      await sb.from("linkedin_accounts").update({ proxy_id: id }).eq("id", accountId).eq("user_id", req.userId!);
+    } else {
+      await sb.from("proxies").update({ account_id: null }).eq("id", id);
+    }
+
+    return { ok: true };
   });
 
   // Crea un proxy propio del usuario (para usar en lugar del de la app)
