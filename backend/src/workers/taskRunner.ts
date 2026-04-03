@@ -1889,7 +1889,7 @@ async function extractRowPreviewText(rowLoc: import("playwright").Locator): Prom
 }
 
 /** Tareas en `running` si el worker murió nunca vuelven a `pending` sin esto. */
-async function recoverStaleRunningTasks(sb: SupabaseClient): Promise<void> {
+async function recoverStaleRunningTasks(sb: SupabaseClient, redis: RedisClient): Promise<void> {
   const mins = Number(process.env.TASK_STALE_RUNNING_MINUTES ?? 45);
   const payload = {
     status: "pending" as const,
@@ -1930,6 +1930,7 @@ async function recoverStaleRunningTasks(sb: SupabaseClient): Promise<void> {
         console.log(
           `[tasks] Reencoladas ${pn} tarea(s) poll en «running» >${pollStaleSec}s — el worker puede seguir con campañas.`
         );
+        for (let i = 0; i < pn; i++) await releaseBrowserSlot(redis).catch(() => {});
       }
     }
   }
@@ -1963,6 +1964,7 @@ async function recoverStaleRunningTasks(sb: SupabaseClient): Promise<void> {
   const n = (a?.length ?? 0) + (b?.length ?? 0);
   if (n > 0) {
     console.log(`[tasks] Reencoladas ${n} tarea(s) que estaban en «running» demasiado tiempo (≥${mins} min).`);
+    for (let i = 0; i < n; i++) await releaseBrowserSlot(redis).catch(() => {});
   }
 }
 
@@ -3545,17 +3547,17 @@ export async function runOneTask(sb: SupabaseClient, redis: RedisClient, taskId:
   } finally {
     if (browser) {
       if (traceCtl) {
-        await traceCtl.stopDiscard();
+        await traceCtl.stopDiscard().catch(() => {});
         traceCtl = null;
       }
-      await closeSession(browser.browser);
+      await closeSession(browser.browser).catch(() => {});
     }
     await releaseBrowserSlot(redis);
   }
 }
 
 export async function processDueTasks(sb: SupabaseClient, redis: RedisClient): Promise<void> {
-  await recoverStaleRunningTasks(sb);
+  await recoverStaleRunningTasks(sb, redis);
 
   const zids = await popDueTaskIds(redis, Date.now(), 10);
   const nowIso = new Date().toISOString();
