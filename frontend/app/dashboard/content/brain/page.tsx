@@ -398,16 +398,38 @@ export default function BrainPage() {
                       </div>
 
                       {/* Label + guardar */}
-                      <div className="min-w-0 flex-1 space-y-1.5">
+                      <div className="min-w-0 flex-1 space-y-2">
+                        <div className="flex flex-wrap gap-1.5">
+                          {["Foto de perfil", "Logo", "Producto", "Equipo", "Evento / charla", "Oficina / espacio", "Captura / resultado", "Otro"].map((tag) => {
+                            const active = labelVal.startsWith(tag);
+                            return (
+                              <button
+                                key={tag}
+                                type="button"
+                                onClick={() => {
+                                  const rest = labelVal.includes("·") ? " · " + labelVal.split("·").slice(1).join("·").trim() : "";
+                                  setEditingLabel((prev) => ({ ...prev, [p.id]: tag + rest }));
+                                }}
+                                className={`rounded-full border px-2.5 py-0.5 text-[11px] font-medium transition-colors ${
+                                  active
+                                    ? "border-[var(--accent)] bg-[color-mix(in_srgb,var(--accent)_15%,transparent)] text-[var(--accent)]"
+                                    : "border-[var(--border)] text-[var(--muted)] hover:border-[var(--text)] hover:text-[var(--text)]"
+                                }`}
+                              >
+                                {tag}
+                              </button>
+                            );
+                          })}
+                        </div>
                         <input
                           className="input-field py-1.5 text-sm"
-                          placeholder="Ej: Foto de perfil profesional · En conferencia hablando · Equipo en oficina"
+                          placeholder="Descripción adicional (opcional): ej. en traje azul, con fondo blanco…"
                           value={labelVal}
                           onChange={(e) => setEditingLabel((prev) => ({ ...prev, [p.id]: e.target.value }))}
                           onKeyDown={(e) => { if (e.key === "Enter") void saveLabel(p.id); }}
                         />
                         <p className="text-[10px] text-[var(--muted)]">
-                          La IA usará este contexto para decidir si es mejor esta foto o generar una imagen.
+                          La IA decide si usar esta foto real o generar una imagen según el contexto del post.
                         </p>
                       </div>
 
