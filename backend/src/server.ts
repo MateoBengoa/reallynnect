@@ -22,6 +22,14 @@ declare module "fastify" {
 
 async function buildServer() {
   const app = Fastify({ logger: true });
+
+  // Permite body vacío con Content-Type: application/json (devuelve {} en lugar de error)
+  app.addContentTypeParser("application/json", { parseAs: "string" }, (_req, body, done) => {
+    if (!body || (body as string).trim() === "") { done(null, {}); return; }
+    try { done(null, JSON.parse(body as string)); }
+    catch (e) { done(e as Error, undefined); }
+  });
+
   await app.register(cors, {
     origin: true,
     allowedHeaders: ["Authorization", "Content-Type", "Accept"],
