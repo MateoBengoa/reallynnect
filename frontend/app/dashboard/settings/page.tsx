@@ -169,7 +169,7 @@ export default function SettingsPage() {
     setProxyTestResults((r) => ({ ...r, [proxyId]: "loading" }));
     try {
       const res = await api<{ ok: boolean; ip?: string | null; warn?: string; error?: string }>(
-        `/proxies/${proxyId}/test`, { method: "POST" }
+        `/proxies/${proxyId}/test`, { method: "POST", body: JSON.stringify({}) }
       );
       setProxyTestResults((r) => ({ ...r, [proxyId]: res }));
     } catch (e) {

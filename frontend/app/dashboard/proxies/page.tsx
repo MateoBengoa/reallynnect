@@ -56,7 +56,7 @@ export default function ProxiesPage() {
       if (!(await getValidAccessToken())) return;
       const r = await api<{ inserted: number; updated: number; total: number; assigned: number }>(
         "/proxies/sync-webshare",
-        { method: "POST" }
+        { method: "POST", body: JSON.stringify({}) }
       );
       setSyncMsg(
         `Sync completado: ${r.inserted} nuevos, ${r.updated} actualizados, ${r.assigned} asignados a cuentas (${r.total} proxies totales).`
