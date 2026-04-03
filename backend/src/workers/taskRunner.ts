@@ -32,11 +32,15 @@ import {
   MAX_BROWSERS,
   acquireBrowserSlot,
   checkUnderDailyCap,
-  enqueueTaskDue,
+  checkUnderHourlyCap,
   incrementDailyCount,
+  incrementHourlyCount,
+  enqueueTaskDue,
   popDueTaskIds,
   releaseBrowserSlot,
   removeTaskFromDue,
+  setAccountCooldown,
+  getAccountCooldownSec,
 } from "../queues/redisClient.js";
 import type { LimitKind, RedisClient } from "../queues/redisClient.js";
 import { decryptSecret } from "../lib/crypto.js";
@@ -1986,6 +1990,72 @@ async function claimTask(sb: SupabaseClient, taskId: string) {
   return data;
 }
 
+/**
+ * Comprueba cap diario + cap horario para un tipo de acción.
+ * Si alguno está agotado, devuelve { ok: false, rescheduleMs: <próximo momento válido> }.
+ * "Próximo momento válido" = medianoche si es diario, inicio de siguiente hora si es horario.
+ */
+async function checkCaps(
+  redis: RedisClient,
+  accountId: string,
+  kind: LimitKind,
+  capOverride: number | undefined,
+  taskAttempts: number
+): Promise<{ ok: true } | { ok: false; rescheduleMs: number; reason: "daily" | "hourly" }> {
+  const [daily, hourly] = await Promise.all([
+    checkUnderDailyCap(redis, accountId, kind, capOverride),
+    checkUnderHourlyCap(redis, accountId, kind),
+  ]);
+  if (!daily.ok) {
+    const tomorrow = new Date();
+    tomorrow.setUTCDate(tomorrow.getUTCDate() + 1);
+    tomorrow.setUTCHours(6 + Math.floor(Math.random() * 2), Math.floor(Math.random() * 30), 0, 0);
+    return { ok: false, rescheduleMs: tomorrow.getTime(), reason: "daily" };
+  }
+  if (!hourly.ok) {
+    // Reprogramar al inicio de la siguiente hora + jitter de hasta 20 min
+    const nextHour = new Date();
+    nextHour.setUTCHours(nextHour.getUTCHours() + 1, Math.floor(Math.random() * 20), 0, 0);
+    return { ok: false, rescheduleMs: nextHour.getTime(), reason: "hourly" };
+  }
+  return { ok: true };
+}
+
+/**
+ * Incrementa contadores diario y horario para un tipo de acción.
+ */
+async function incrementCaps(
+  redis: RedisClient,
+  accountId: string,
+  kind: LimitKind,
+  capOverride: number | undefined
+): Promise<void> {
+  await Promise.all([
+    incrementDailyCount(redis, accountId, kind, capOverride),
+    incrementHourlyCount(redis, accountId, kind),
+  ]);
+}
+
+/**
+ * Persiste el reschedule cuando un cap está agotado y retorna.
+ */
+async function applyCapReschedule(
+  sb: SupabaseClient,
+  redis: RedisClient,
+  taskId: string,
+  taskAttempts: number,
+  rescheduleMs: number,
+  reason: string
+): Promise<void> {
+  await sb.from("tasks").update({
+    status: "pending",
+    scheduled_at: new Date(rescheduleMs).toISOString(),
+    attempts: Math.max(0, taskAttempts - 1),
+    error_message: `cap_${reason}`,
+  }).eq("id", taskId);
+  await enqueueTaskDue(redis, taskId, rescheduleMs);
+}
+
 async function failTask(
   sb: SupabaseClient,
   redis: RedisClient,
@@ -2043,6 +2113,34 @@ function proxyServer(row: { host: string; port: number }): string {
   return `http://${row.host}:${row.port}`;
 }
 
+/**
+ * Devuelve true si la hora UTC actual está dentro del horario de trabajo configurado.
+ * Variables de entorno: AUTOMATION_WORK_HOURS_START (default 7) y AUTOMATION_WORK_HOURS_END (default 21).
+ * La comprobación es en UTC; ajusta con AUTOMATION_WORK_HOURS_UTC_OFFSET si el equipo está en otra zona.
+ */
+function isWithinWorkingHours(): boolean {
+  const startH = parseInt(process.env.AUTOMATION_WORK_HOURS_START ?? "7",  10);
+  const endH   = parseInt(process.env.AUTOMATION_WORK_HOURS_END   ?? "21", 10);
+  const offsetH = parseFloat(process.env.AUTOMATION_WORK_HOURS_UTC_OFFSET ?? "0");
+  if (!Number.isFinite(startH) || !Number.isFinite(endH)) return true;
+  const nowH = (new Date().getUTCHours() + offsetH + 24) % 24;
+  return nowH >= startH && nowH < endH;
+}
+
+/** Acciones de automatización que consumen cuota LinkedIn y requieren cooldown. */
+const LINKEDIN_AUTOMATION_ACTIONS = new Set([
+  "visit_profile",
+  "connect",
+  "follow",
+  "send_message",
+  "send_message_open_profile",
+  "voice_note",
+  "reply_comment",
+  "inmail",
+  "like_post",
+  "comment_post",
+]);
+
 export async function runOneTask(sb: SupabaseClient, redis: RedisClient, taskId: string): Promise<void> {
   const task = await claimTask(sb, taskId);
   if (!task) return;
@@ -2089,9 +2187,48 @@ export async function runOneTask(sb: SupabaseClient, redis: RedisClient, taskId:
         attempts: Math.max(0, (task.attempts as number) - 1),
       })
       .eq("id", taskId);
-  
+
     await enqueueTaskDue(redis, taskId, next);
     return;
+  }
+
+  // ── Guardia 1: horario laboral ────────────────────────────────────────────
+  // Las tareas de automatización LinkedIn solo corren dentro del horario configurado
+  // (por defecto 07:00-21:00 UTC). Fuera de ese rango, reprogramar para el inicio
+  // del siguiente bloque horario para no desperdiciar intentos.
+  if (LINKEDIN_AUTOMATION_ACTIONS.has(action) && !isWithinWorkingHours()) {
+    const startH = parseInt(process.env.AUTOMATION_WORK_HOURS_START ?? "7", 10);
+    const next = new Date();
+    next.setUTCDate(next.getUTCDate() + (next.getUTCHours() >= startH ? 1 : 0));
+    next.setUTCHours(startH, Math.floor(Math.random() * 20), 0, 0); // pequeño jitter de minutos
+    const nextMs = next.getTime();
+    await sb.from("tasks").update({
+      status: "pending",
+      scheduled_at: new Date(nextMs).toISOString(),
+      attempts: Math.max(0, (task.attempts as number) - 1),
+      error_message: "outside_work_hours",
+    }).eq("id", taskId);
+    await enqueueTaskDue(redis, taskId, nextMs);
+    console.log(`[worker] Tarea ${taskId.slice(0, 8)} (${action}) fuera de horario — reprogramada para ${new Date(nextMs).toISOString()}`);
+    return;
+  }
+
+  // ── Guardia 2: cooldown entre acciones por cuenta ─────────────────────────
+  // Simula el tiempo mínimo que un humano tarda entre acciones LinkedIn.
+  // Evita ráfagas de actividad que disparan detección de bots.
+  if (LINKEDIN_AUTOMATION_ACTIONS.has(action)) {
+    const cooldownSec = await getAccountCooldownSec(redis, accountId);
+    if (cooldownSec > 0) {
+      const nextMs = Date.now() + (cooldownSec + 15) * 1000;
+      await sb.from("tasks").update({
+        status: "pending",
+        scheduled_at: new Date(nextMs).toISOString(),
+        attempts: Math.max(0, (task.attempts as number) - 1),
+        error_message: "account_cooldown",
+      }).eq("id", taskId);
+      await enqueueTaskDue(redis, taskId, nextMs);
+      return;
+    }
   }
 
   let liAt: string;
@@ -2151,8 +2288,17 @@ export async function runOneTask(sb: SupabaseClient, redis: RedisClient, taskId:
           }
         : undefined;
 
+    // Safety gate: si REQUIRE_PROXY=true nunca lanzamos sin proxy para no exponer la IP del VPS
+    if (!proxy && process.env.REQUIRE_PROXY === "true") {
+      const reschedAt = new Date(Date.now() + 5 * 60_000).toISOString();
+      await sb.from("tasks").update({ status: "pending", scheduled_at: reschedAt, error_message: "no_proxy_available", attempts: Math.max(0, (task.attempts as number) - 1) }).eq("id", taskId);
+      await enqueueTaskDue(redis, taskId, Date.now() + 5 * 60_000).catch(() => {});
+      console.warn(`[worker] Tarea ${taskId.slice(0, 8)} sin proxy — reprogramada en 5 min (REQUIRE_PROXY=true)`);
+      return;
+    }
+
     const headless = process.env.PLAYWRIGHT_HEADLESS !== "false";
-    console.log("[worker] Abriendo navegador (headless=", headless, ") para", action);
+    console.log("[worker] Abriendo navegador (headless=", headless, proxy ? `proxy=${proxyRow?.host}` : "SIN PROXY ⚠️", ") para", action);
     browser = await createContext({ proxy, headless });
     const { page } = browser;
     await injectLiAt(page, liAt);
@@ -2217,6 +2363,11 @@ export async function runOneTask(sb: SupabaseClient, redis: RedisClient, taskId:
 
     const afterSuccess = async () => {
       await completeTask(sb, redis, taskId);
+      // Cooldown post-acción: impide que la siguiente tarea de esta cuenta arranque
+      // inmediatamente — simula el tiempo humano entre acciones LinkedIn.
+      if (LINKEDIN_AUTOMATION_ACTIONS.has(action)) {
+        await setAccountCooldown(redis, accountId).catch(() => {});
+      }
       if (enrollmentId) {
         try {
           await advanceEnrollmentAfterStep(sb, redis, enrollmentId);
@@ -2384,23 +2535,8 @@ export async function runOneTask(sb: SupabaseClient, redis: RedisClient, taskId:
     }
 
     if (action === "visit_profile") {
-      const cap = await checkUnderDailyCap(redis, accountId, "visit", accountDailyCap(account, "visit"));
-      if (!cap.ok) {
-        const tomorrow = new Date();
-        tomorrow.setUTCDate(tomorrow.getUTCDate() + 1);
-        tomorrow.setUTCHours(6, 0, 0, 0);
-        await sb
-          .from("tasks")
-          .update({
-            status: "pending",
-            scheduled_at: tomorrow.toISOString(),
-            attempts: Math.max(0, (task.attempts as number) - 1),
-          })
-          .eq("id", taskId);
-      
-        await enqueueTaskDue(redis, taskId, tomorrow.getTime());
-        return;
-      }
+      const capCheck = await checkCaps(redis, accountId, "visit", accountDailyCap(account, "visit"), task.attempts as number);
+      if (!capCheck.ok) { await applyCapReschedule(sb, redis, taskId, task.attempts as number, capCheck.rescheduleMs, capCheck.reason); return; }
       const profileUrl = String(payload.profile_url ?? "");
       const r = await visitProfile(page, profileUrl, { light: true });
       if (r.softban) {
@@ -2412,13 +2548,12 @@ export async function runOneTask(sb: SupabaseClient, redis: RedisClient, taskId:
         await fail(r.error ?? "visit_failed");
         return;
       }
-      await ensureProfilePageLoaded(page, profileUrl);
       await persistLeadProfilePhotoFromOpenPage(sb, page, {
         leadId: task.lead_id as string | null | undefined,
         accountUserId: account.user_id as string,
         profileUrl,
       });
-      await incrementDailyCount(redis, accountId, "visit", accountDailyCap(account, "visit"));
+      await incrementCaps(redis, accountId, "visit", accountDailyCap(account, "visit"));
       await afterSuccess();
       return;
     }
@@ -2438,15 +2573,8 @@ export async function runOneTask(sb: SupabaseClient, redis: RedisClient, taskId:
     }
 
     if (action === "follow") {
-      const cap = await checkUnderDailyCap(redis, accountId, "connect", accountDailyCap(account, "connect"));
-      if (!cap.ok) {
-        const tomorrow = new Date();
-        tomorrow.setUTCDate(tomorrow.getUTCDate() + 1);
-        tomorrow.setUTCHours(7, 0, 0, 0);
-        await sb.from("tasks").update({ status: "pending", scheduled_at: tomorrow.toISOString(), attempts: Math.max(0, (task.attempts as number) - 1) }).eq("id", taskId);
-        await enqueueTaskDue(redis, taskId, tomorrow.getTime());
-        return;
-      }
+      const capCheck = await checkCaps(redis, accountId, "connect", accountDailyCap(account, "connect"), task.attempts as number);
+      if (!capCheck.ok) { await applyCapReschedule(sb, redis, taskId, task.attempts as number, capCheck.rescheduleMs, capCheck.reason); return; }
       const profileUrl = String(payload.profile_url ?? "");
       const r = await followProfile(page, profileUrl);
       if (r.softban) {
@@ -2458,21 +2586,14 @@ export async function runOneTask(sb: SupabaseClient, redis: RedisClient, taskId:
         await fail(r.error ?? "follow_failed");
         return;
       }
-      await incrementDailyCount(redis, accountId, "connect", accountDailyCap(account, "connect"));
+      await incrementCaps(redis, accountId, "connect", accountDailyCap(account, "connect"));
       await afterSuccess();
       return;
     }
 
     if (action === "like_post") {
-      const cap = await checkUnderDailyCap(redis, accountId, "visit", accountDailyCap(account, "visit"));
-      if (!cap.ok) {
-        const tomorrow = new Date();
-        tomorrow.setUTCDate(tomorrow.getUTCDate() + 1);
-        tomorrow.setUTCHours(6, 0, 0, 0);
-        await sb.from("tasks").update({ status: "pending", scheduled_at: tomorrow.toISOString(), attempts: Math.max(0, (task.attempts as number) - 1) }).eq("id", taskId);
-        await enqueueTaskDue(redis, taskId, tomorrow.getTime());
-        return;
-      }
+      const capCheck = await checkCaps(redis, accountId, "visit", accountDailyCap(account, "visit"), task.attempts as number);
+      if (!capCheck.ok) { await applyCapReschedule(sb, redis, taskId, task.attempts as number, capCheck.rescheduleMs, capCheck.reason); return; }
       const profileUrl = String(payload.profile_url ?? "");
       const r = await likeLeadRecentPost(page, profileUrl);
       if (r.softban) {
@@ -2484,21 +2605,14 @@ export async function runOneTask(sb: SupabaseClient, redis: RedisClient, taskId:
         await fail(r.error ?? "like_failed");
         return;
       }
-      await incrementDailyCount(redis, accountId, "visit", accountDailyCap(account, "visit"));
+      await incrementCaps(redis, accountId, "visit", accountDailyCap(account, "visit"));
       await afterSuccess();
       return;
     }
 
     if (action === "comment_post") {
-      const cap = await checkUnderDailyCap(redis, accountId, "message", accountDailyCap(account, "message"));
-      if (!cap.ok) {
-        const tomorrow = new Date();
-        tomorrow.setUTCDate(tomorrow.getUTCDate() + 1);
-        tomorrow.setUTCHours(8, 0, 0, 0);
-        await sb.from("tasks").update({ status: "pending", scheduled_at: tomorrow.toISOString(), attempts: Math.max(0, (task.attempts as number) - 1) }).eq("id", taskId);
-        await enqueueTaskDue(redis, taskId, tomorrow.getTime());
-        return;
-      }
+      const capCheck = await checkCaps(redis, accountId, "message", accountDailyCap(account, "message"), task.attempts as number);
+      if (!capCheck.ok) { await applyCapReschedule(sb, redis, taskId, task.attempts as number, capCheck.rescheduleMs, capCheck.reason); return; }
       const profileUrl = String(payload.profile_url ?? "");
       const tmpl = (payload.message_template as string | undefined) ?? "";
       let commentText = tmpl
@@ -2523,29 +2637,14 @@ export async function runOneTask(sb: SupabaseClient, redis: RedisClient, taskId:
         await fail(r.error ?? "comment_failed");
         return;
       }
-      await incrementDailyCount(redis, accountId, "message", accountDailyCap(account, "message"));
+      await incrementCaps(redis, accountId, "message", accountDailyCap(account, "message"));
       await afterSuccess();
       return;
     }
 
     if (action === "connect") {
-      const cap = await checkUnderDailyCap(redis, accountId, "connect", accountDailyCap(account, "connect"));
-      if (!cap.ok) {
-        const tomorrow = new Date();
-        tomorrow.setUTCDate(tomorrow.getUTCDate() + 1);
-        tomorrow.setUTCHours(7, 0, 0, 0);
-        await sb
-          .from("tasks")
-          .update({
-            status: "pending",
-            scheduled_at: tomorrow.toISOString(),
-            attempts: Math.max(0, (task.attempts as number) - 1),
-          })
-          .eq("id", taskId);
-      
-        await enqueueTaskDue(redis, taskId, tomorrow.getTime());
-        return;
-      }
+      const capCheck = await checkCaps(redis, accountId, "connect", accountDailyCap(account, "connect"), task.attempts as number);
+      if (!capCheck.ok) { await applyCapReschedule(sb, redis, taskId, task.attempts as number, capCheck.rescheduleMs, capCheck.reason); return; }
       const profileUrl = String(payload.profile_url ?? "");
       let note = payload.note as string | undefined;
       const tmpl = payload.message_template as string | undefined;
@@ -2571,29 +2670,14 @@ export async function runOneTask(sb: SupabaseClient, redis: RedisClient, taskId:
         await fail(r.error ?? "connect_failed");
         return;
       }
-      await incrementDailyCount(redis, accountId, "connect", accountDailyCap(account, "connect"));
+      await incrementCaps(redis, accountId, "connect", accountDailyCap(account, "connect"));
       await afterSuccess();
       return;
     }
 
     if (action === "send_message") {
-      const cap = await checkUnderDailyCap(redis, accountId, "message", accountDailyCap(account, "message"));
-      if (!cap.ok) {
-        const tomorrow = new Date();
-        tomorrow.setUTCDate(tomorrow.getUTCDate() + 1);
-        tomorrow.setUTCHours(8, 0, 0, 0);
-        await sb
-          .from("tasks")
-          .update({
-            status: "pending",
-            scheduled_at: tomorrow.toISOString(),
-            attempts: Math.max(0, (task.attempts as number) - 1),
-          })
-          .eq("id", taskId);
-      
-        await enqueueTaskDue(redis, taskId, tomorrow.getTime());
-        return;
-      }
+      const capCheck = await checkCaps(redis, accountId, "message", accountDailyCap(account, "message"), task.attempts as number);
+      if (!capCheck.ok) { await applyCapReschedule(sb, redis, taskId, task.attempts as number, capCheck.rescheduleMs, capCheck.reason); return; }
       const profileUrl = String(payload.profile_url ?? "");
       let text =
         (payload.message_template as string | undefined)?.replace(/\{name\}/gi, String(payload.lead_name ?? "")) ??
@@ -2616,29 +2700,14 @@ export async function runOneTask(sb: SupabaseClient, redis: RedisClient, taskId:
         await fail(r.error ?? "message_failed");
         return;
       }
-      await incrementDailyCount(redis, accountId, "message", accountDailyCap(account, "message"));
+      await incrementCaps(redis, accountId, "message", accountDailyCap(account, "message"));
       await afterSuccess();
       return;
     }
 
     if (action === "send_message_open_profile") {
-      const cap = await checkUnderDailyCap(redis, accountId, "message", accountDailyCap(account, "message"));
-      if (!cap.ok) {
-        const tomorrow = new Date();
-        tomorrow.setUTCDate(tomorrow.getUTCDate() + 1);
-        tomorrow.setUTCHours(8, 0, 0, 0);
-        await sb
-          .from("tasks")
-          .update({
-            status: "pending",
-            scheduled_at: tomorrow.toISOString(),
-            attempts: Math.max(0, (task.attempts as number) - 1),
-          })
-          .eq("id", taskId);
-      
-        await enqueueTaskDue(redis, taskId, tomorrow.getTime());
-        return;
-      }
+      const capCheck = await checkCaps(redis, accountId, "message", accountDailyCap(account, "message"), task.attempts as number);
+      if (!capCheck.ok) { await applyCapReschedule(sb, redis, taskId, task.attempts as number, capCheck.rescheduleMs, capCheck.reason); return; }
       const profileUrl = String(payload.profile_url ?? "");
       let text =
         (payload.message_template as string | undefined)?.replace(/\{name\}/gi, String(payload.lead_name ?? "")) ??
@@ -2661,29 +2730,14 @@ export async function runOneTask(sb: SupabaseClient, redis: RedisClient, taskId:
         await fail(r.error ?? "message_failed");
         return;
       }
-      await incrementDailyCount(redis, accountId, "message", accountDailyCap(account, "message"));
+      await incrementCaps(redis, accountId, "message", accountDailyCap(account, "message"));
       await afterSuccess();
       return;
     }
 
     if (action === "voice_note") {
-      const cap = await checkUnderDailyCap(redis, accountId, "message", accountDailyCap(account, "message"));
-      if (!cap.ok) {
-        const tomorrow = new Date();
-        tomorrow.setUTCDate(tomorrow.getUTCDate() + 1);
-        tomorrow.setUTCHours(8, 0, 0, 0);
-        await sb
-          .from("tasks")
-          .update({
-            status: "pending",
-            scheduled_at: tomorrow.toISOString(),
-            attempts: Math.max(0, (task.attempts as number) - 1),
-          })
-          .eq("id", taskId);
-      
-        await enqueueTaskDue(redis, taskId, tomorrow.getTime());
-        return;
-      }
+      const capCheck = await checkCaps(redis, accountId, "message", accountDailyCap(account, "message"), task.attempts as number);
+      if (!capCheck.ok) { await applyCapReschedule(sb, redis, taskId, task.attempts as number, capCheck.rescheduleMs, capCheck.reason); return; }
       const profileUrl = String(payload.profile_url ?? "");
       const tmpl = String(payload.message_template ?? "");
       const b64match = tmpl.trim().match(/^data:[^;]+;base64,([\s\S]+)$/i);
@@ -2716,7 +2770,7 @@ export async function runOneTask(sb: SupabaseClient, redis: RedisClient, taskId:
           await fail(r.error ?? "voice_note_failed");
           return;
         }
-        await incrementDailyCount(redis, accountId, "message", accountDailyCap(account, "message"));
+        await incrementCaps(redis, accountId, "message", accountDailyCap(account, "message"));
         await afterSuccess();
       } finally {
         await fs.unlink(tmpPath).catch(() => {});
@@ -2725,15 +2779,8 @@ export async function runOneTask(sb: SupabaseClient, redis: RedisClient, taskId:
     }
 
     if (action === "reply_comment") {
-      const cap = await checkUnderDailyCap(redis, accountId, "message", accountDailyCap(account, "message"));
-      if (!cap.ok) {
-        const tomorrow = new Date();
-        tomorrow.setUTCDate(tomorrow.getUTCDate() + 1);
-        tomorrow.setUTCHours(8, 0, 0, 0);
-        await sb.from("tasks").update({ status: "pending", scheduled_at: tomorrow.toISOString(), attempts: Math.max(0, (task.attempts as number) - 1) }).eq("id", taskId);
-        await enqueueTaskDue(redis, taskId, tomorrow.getTime());
-        return;
-      }
+      const capCheck = await checkCaps(redis, accountId, "message", accountDailyCap(account, "message"), task.attempts as number);
+      if (!capCheck.ok) { await applyCapReschedule(sb, redis, taskId, task.attempts as number, capCheck.rescheduleMs, capCheck.reason); return; }
       const profileUrl = String(payload.profile_url ?? "");
       const tmpl = (payload.message_template as string | undefined) ?? "";
       let text = tmpl
@@ -2758,29 +2805,14 @@ export async function runOneTask(sb: SupabaseClient, redis: RedisClient, taskId:
         await fail(r.error ?? "reply_comment_failed");
         return;
       }
-      await incrementDailyCount(redis, accountId, "message", accountDailyCap(account, "message"));
+      await incrementCaps(redis, accountId, "message", accountDailyCap(account, "message"));
       await afterSuccess();
       return;
     }
 
     if (action === "inmail") {
-      const cap = await checkUnderDailyCap(redis, accountId, "message", accountDailyCap(account, "message"));
-      if (!cap.ok) {
-        const tomorrow = new Date();
-        tomorrow.setUTCDate(tomorrow.getUTCDate() + 1);
-        tomorrow.setUTCHours(8, 0, 0, 0);
-        await sb
-          .from("tasks")
-          .update({
-            status: "pending",
-            scheduled_at: tomorrow.toISOString(),
-            attempts: Math.max(0, (task.attempts as number) - 1),
-          })
-          .eq("id", taskId);
-      
-        await enqueueTaskDue(redis, taskId, tomorrow.getTime());
-        return;
-      }
+      const capCheck = await checkCaps(redis, accountId, "message", accountDailyCap(account, "message"), task.attempts as number);
+      if (!capCheck.ok) { await applyCapReschedule(sb, redis, taskId, task.attempts as number, capCheck.rescheduleMs, capCheck.reason); return; }
       const profileUrl = String(payload.profile_url ?? "");
       const raw = String(payload.message_template ?? "");
       const parts = raw.split(/\n---\n/);
@@ -2816,7 +2848,7 @@ export async function runOneTask(sb: SupabaseClient, redis: RedisClient, taskId:
         await fail(r.error ?? "inmail_failed");
         return;
       }
-      await incrementDailyCount(redis, accountId, "message", accountDailyCap(account, "message"));
+      await incrementCaps(redis, accountId, "message", accountDailyCap(account, "message"));
       await afterSuccess();
       return;
     }
@@ -3170,7 +3202,7 @@ export async function runOneTask(sb: SupabaseClient, redis: RedisClient, taskId:
                       } else {
                         const rDm = await sendMessageToProfile(page, profileUrl, dmText.slice(0, 8000));
                         if (rDm.ok) {
-                          await incrementDailyCount(
+                          await incrementCaps(
                             redis,
                             accountId,
                             "message",
@@ -3467,23 +3499,8 @@ export async function runOneTask(sb: SupabaseClient, redis: RedisClient, taskId:
         return;
       }
       const { conversationId } = normalizeMessagingThreadInput(threadRef);
-      const cap = await checkUnderDailyCap(redis, accountId, "message", accountDailyCap(account, "message"));
-      if (!cap.ok) {
-        const tomorrow = new Date();
-        tomorrow.setUTCDate(tomorrow.getUTCDate() + 1);
-        tomorrow.setUTCHours(8, 0, 0, 0);
-        await sb
-          .from("tasks")
-          .update({
-            status: "pending",
-            scheduled_at: tomorrow.toISOString(),
-            attempts: Math.max(0, (task.attempts as number) - 1),
-          })
-          .eq("id", taskId);
-      
-        await enqueueTaskDue(redis, taskId, tomorrow.getTime());
-        return;
-      }
+      const capCheck = await checkCaps(redis, accountId, "message", accountDailyCap(account, "message"), task.attempts as number);
+      if (!capCheck.ok) { await applyCapReschedule(sb, redis, taskId, task.attempts as number, capCheck.rescheduleMs, capCheck.reason); return; }
       const r = await sendMessageInMessagingThread(page, threadRef, text);
       if (r.softban) {
         await pauseAccountSoftban(sb, accountId);
@@ -3495,7 +3512,7 @@ export async function runOneTask(sb: SupabaseClient, redis: RedisClient, taskId:
         return;
       }
       await insertChatRowIfFresh(sb, accountId, conversationId || threadRef, text, "out");
-      await incrementDailyCount(redis, accountId, "message", accountDailyCap(account, "message"));
+      await incrementCaps(redis, accountId, "message", accountDailyCap(account, "message"));
       await completeTask(sb, redis, taskId);
       return;
     }

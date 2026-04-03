@@ -178,16 +178,41 @@ export async function removeTaskFromDue(redis: RedisClient, taskId: string): Pro
   return redis.zrem(TASKS_DUE_ZSET, taskId);
 }
 
+// ─── Helpers de tiempo ────────────────────────────────────────────────────────
+
 function utcDayKey(d = new Date()): string {
   return d.toISOString().slice(0, 10);
 }
 
+function utcHourKey(d = new Date()): string {
+  return `${d.toISOString().slice(0, 13)}h`; // "2024-01-15T14h"
+}
+
+// ─── Límites diarios y por hora ───────────────────────────────────────────────
+
 export type LimitKind = "visit" | "connect" | "message";
 
-const LIMITS: Record<LimitKind, { min: number; max: number }> = {
-  visit: { min: 100, max: 100 },
-  connect: { min: 20, max: 40 },
-  message: { min: 40, max: 80 },
+/**
+ * Límites diarios conservadores para evitar bloqueos de LinkedIn.
+ * LinkedIn sanciona cuentas que superan estos umbrales incluso con navegación humana.
+ * - visit:   80-100 max real; usamos 25-40 para cuentas nuevas/sin historial
+ * - connect: 15-20 max real; usamos 8-12 (envío de invitaciones es lo más vigilado)
+ * - message: 30-40 max real; usamos 15-25
+ */
+const DAILY_LIMITS: Record<LimitKind, { min: number; max: number }> = {
+  visit:   { min: 25, max: 40 },
+  connect: { min: 8,  max: 12 },
+  message: { min: 15, max: 25 },
+};
+
+/**
+ * Límites por hora: mantiene el ritmo distribuido a lo largo del día.
+ * Evita ráfagas de actividad (ej. 20 visitas en 1 hora es raro en humanos).
+ */
+const HOURLY_LIMITS: Record<LimitKind, { min: number; max: number }> = {
+  visit:   { min: 4, max: 7 },
+  connect: { min: 2, max: 3 },
+  message: { min: 3, max: 6 },
 };
 
 function hashToInt(s: string): number {
@@ -196,10 +221,17 @@ function hashToInt(s: string): number {
   return h;
 }
 
-/** Deterministic cap per account+day so checks stay consistent. */
+/** Cap diario determinista (varía por cuenta y día para no parecer mecánico). */
 export function dailyCap(accountId: string, kind: LimitKind): number {
-  const { min, max } = LIMITS[kind];
+  const { min, max } = DAILY_LIMITS[kind];
   const h = hashToInt(`${accountId}:${kind}:${utcDayKey()}`);
+  return min + (h % (max - min + 1));
+}
+
+/** Cap por hora determinista. */
+export function hourlyCap(accountId: string, kind: LimitKind): number {
+  const { min, max } = HOURLY_LIMITS[kind];
+  const h = hashToInt(`${accountId}:${kind}:${utcHourKey()}`);
   return min + (h % (max - min + 1));
 }
 
@@ -209,6 +241,12 @@ function resolveCap(accountId: string, kind: LimitKind, capOverride?: number | n
   }
   return dailyCap(accountId, kind);
 }
+
+function resolveHourlyCap(accountId: string, kind: LimitKind): number {
+  return hourlyCap(accountId, kind);
+}
+
+// ─── Contadores diarios ───────────────────────────────────────────────────────
 
 export async function incrementDailyCount(
   redis: RedisClient,
@@ -265,4 +303,98 @@ export async function checkUnderDailyCap(
   const count = await getDailyCount(redis, accountId, kind);
   const cap = resolveCap(accountId, kind, capOverride);
   return { ok: count < cap, count, cap };
+}
+
+// ─── Contadores por hora ──────────────────────────────────────────────────────
+
+export async function incrementHourlyCount(
+  redis: RedisClient,
+  accountId: string,
+  kind: LimitKind
+): Promise<{ count: number; cap: number }> {
+  const hour = utcHourKey();
+  const key = `hlimit:${kind}:${accountId}:${hour}`;
+  const cap = resolveHourlyCap(accountId, kind);
+
+  if (isMemoryRedis(redis)) {
+    const existing = memKv.get(key);
+    const now = Date.now();
+    if (existing && (existing.expMs === undefined || now <= existing.expMs)) {
+      const count = parseInt(existing.val, 10) + 1;
+      memKv.set(key, { val: String(count), expMs: existing.expMs });
+      return { count, cap };
+    }
+    const end = new Date();
+    end.setMinutes(59, 59, 999);
+    memKv.set(key, { val: "1", expMs: end.getTime() });
+    return { count: 1, cap };
+  }
+
+  const count = await redis.incr(key);
+  if (count === 1) await redis.expire(key, 3600);
+  return { count, cap };
+}
+
+export async function getHourlyCount(redis: RedisClient, accountId: string, kind: LimitKind): Promise<number> {
+  const hour = utcHourKey();
+  const key = `hlimit:${kind}:${accountId}:${hour}`;
+  if (isMemoryRedis(redis)) {
+    const v = memGet(key);
+    return v ? parseInt(v, 10) : 0;
+  }
+  const v = await redis.get(key);
+  return v ? parseInt(v, 10) : 0;
+}
+
+export async function checkUnderHourlyCap(
+  redis: RedisClient,
+  accountId: string,
+  kind: LimitKind
+): Promise<{ ok: boolean; count: number; cap: number }> {
+  const count = await getHourlyCount(redis, accountId, kind);
+  const cap = resolveHourlyCap(accountId, kind);
+  return { ok: count < cap, count, cap };
+}
+
+// ─── Cooldown entre acciones por cuenta ──────────────────────────────────────
+
+/**
+ * Establece un cooldown para la cuenta: no ejecutar otra tarea de automatización
+ * hasta que expire el TTL. Simula el tiempo que un humano tarda entre acciones.
+ * Default: 3-8 minutos aleatorio, configurable con ACCOUNT_COOLDOWN_MIN_SEC / MAX_SEC.
+ */
+export async function setAccountCooldown(
+  redis: RedisClient,
+  accountId: string,
+  minSec?: number,
+  maxSec?: number
+): Promise<number> {
+  const envMin = parseInt(process.env.ACCOUNT_COOLDOWN_MIN_SEC ?? "180", 10);
+  const envMax = parseInt(process.env.ACCOUNT_COOLDOWN_MAX_SEC ?? "480", 10);
+  const lo = Number.isFinite(minSec) ? (minSec as number) : envMin;
+  const hi = Number.isFinite(maxSec) ? (maxSec as number) : envMax;
+  const ttlSec = Math.max(30, Math.floor(lo + Math.random() * Math.max(0, hi - lo)));
+
+  const key = `cooldown:account:${accountId}`;
+  if (isMemoryRedis(redis)) {
+    memKv.set(key, { val: "1", expMs: Date.now() + ttlSec * 1000 });
+    return ttlSec;
+  }
+  await redis.set(key, "1", "EX", ttlSec);
+  return ttlSec;
+}
+
+/**
+ * Devuelve los segundos restantes de cooldown (0 = puede ejecutar).
+ */
+export async function getAccountCooldownSec(redis: RedisClient, accountId: string): Promise<number> {
+  const key = `cooldown:account:${accountId}`;
+  if (isMemoryRedis(redis)) {
+    const e = memKv.get(key);
+    if (!e || e.expMs === undefined) return 0;
+    const rem = Math.ceil((e.expMs - Date.now()) / 1000);
+    return rem > 0 ? rem : 0;
+  }
+  const ttl = await redis.ttl(key);
+  return ttl > 0 ? ttl : 0;
 }

@@ -62,6 +62,9 @@ export async function visitProfile(page: Page, profileUrl: string, options?: Vis
   if (navigatedToFeedOrActivity(page.url())) {
     await page.goto(url, { waitUntil: "domcontentloaded", timeout: 90000 });
     await lightMouseJitter(page);
+    if (navigatedToFeedOrActivity(page.url())) {
+      return { ok: false, error: "profile_redirect_to_feed" };
+    }
   }
   if (light) {
     await page.evaluate(() => window.scrollTo({ top: 0, left: 0, behavior: "instant" }));
