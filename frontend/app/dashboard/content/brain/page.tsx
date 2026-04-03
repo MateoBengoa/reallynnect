@@ -374,6 +374,11 @@ export default function BrainPage() {
                 {photos.map((p) => {
                   const labelVal = editingLabel[p.id] ?? p.label ?? "";
                   const isDirty = labelVal !== (p.label ?? "");
+                  const TAGS = ["Foto de perfil", "Logo", "Producto", "Equipo", "Evento / charla", "Oficina / espacio", "Captura / resultado", "Otro"];
+                  const hasTag = TAGS.some((t) => labelVal.startsWith(t));
+                  const hasDesc = labelVal.trim().length > 0;
+                  const isValid = hasTag && hasDesc;
+                  const showError = isDirty && !isValid;
                   return (
                     <div key={p.id} className="flex items-start gap-3 rounded-[var(--radius-md)] border border-[var(--border)] bg-[color-mix(in_srgb,var(--text)_2%,var(--surface))] p-3">
                       {/* Thumbnail */}
@@ -400,7 +405,11 @@ export default function BrainPage() {
                       {/* Label + guardar */}
                       <div className="min-w-0 flex-1 space-y-2">
                         <div className="flex flex-wrap gap-1.5">
-                          {["Foto de perfil", "Logo", "Producto", "Equipo", "Evento / charla", "Oficina / espacio", "Captura / resultado", "Otro"].map((tag) => {
+                          <span className="w-full text-[10px] font-semibold text-[var(--muted)]">
+                            Tipo <span className="text-red-400">*</span>
+                            {showError && !hasTag && <span className="ml-1 text-red-400">— seleccioná uno</span>}
+                          </span>
+                          {TAGS.map((tag) => {
                             const active = labelVal.startsWith(tag);
                             return (
                               <button
@@ -421,24 +430,31 @@ export default function BrainPage() {
                             );
                           })}
                         </div>
-                        <input
-                          className="input-field py-1.5 text-sm"
-                          placeholder="Descripción adicional (opcional): ej. en traje azul, con fondo blanco…"
-                          value={labelVal}
-                          onChange={(e) => setEditingLabel((prev) => ({ ...prev, [p.id]: e.target.value }))}
-                          onKeyDown={(e) => { if (e.key === "Enter") void saveLabel(p.id); }}
-                        />
+                        <div>
+                          <label className="text-[10px] font-semibold text-[var(--muted)]">
+                            Descripción <span className="text-red-400">*</span>
+                            {showError && !hasDesc && <span className="ml-1 text-red-400">— requerida</span>}
+                          </label>
+                          <input
+                            className={`input-field mt-1 py-1.5 text-sm ${showError && !hasDesc ? "border-red-500/50" : ""}`}
+                            placeholder="Ej. de frente, fondo gris, traje azul · con logo en blanco sobre fondo oscuro…"
+                            value={labelVal}
+                            onChange={(e) => setEditingLabel((prev) => ({ ...prev, [p.id]: e.target.value }))}
+                            onKeyDown={(e) => { if (e.key === "Enter" && isValid) void saveLabel(p.id); }}
+                          />
+                        </div>
                         <p className="text-[10px] text-[var(--muted)]">
-                          La IA decide si usar esta foto real o generar una imagen según el contexto del post.
+                          La IA decide si usar esta foto o generar una imagen según el contexto del post.
                         </p>
                       </div>
 
                       {isDirty && (
                         <button
                           type="button"
-                          disabled={savingLabel === p.id}
+                          disabled={savingLabel === p.id || !isValid}
                           onClick={() => void saveLabel(p.id)}
                           className="btn-primary shrink-0 px-3 py-1.5 text-xs disabled:opacity-50"
+                          title={!isValid ? "Seleccioná un tipo y añadí una descripción" : ""}
                         >
                           {savingLabel === p.id ? "…" : "Guardar"}
                         </button>
