@@ -158,9 +158,16 @@ export default function AccountsPage() {
   }
 
   async function remove(id: string) {
+    const acc = accounts.find((a) => a.id === id);
+    const label = acc?.li_display_name ?? id.slice(0, 8);
+    if (!window.confirm(`¿Eliminar la cuenta "${label}"? Esta acción no se puede deshacer.`)) return;
     if (!(await getValidAccessToken())) return;
-    await api(`/linkedin-accounts/${id}`, { method: "DELETE" });
-    await load();
+    try {
+      await api(`/linkedin-accounts/${id}`, { method: "DELETE" });
+      await load();
+    } catch (e: unknown) {
+      setMsg(e instanceof Error ? e.message : "Error al eliminar la cuenta");
+    }
   }
 
   function numOrNull(s: string): number | null {

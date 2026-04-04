@@ -175,7 +175,8 @@ const STEP_TO_ACTION: Record<string, string> = {
 export async function scheduleEnrollmentStep(
   sb: SupabaseClient,
   redis: RedisClient,
-  enrollmentId: string
+  enrollmentId: string,
+  forcedAccountId?: string
 ): Promise<boolean> {
   const { data: en, error: e1 } = await sb
     .from("campaign_enrollments")
@@ -220,15 +221,17 @@ export async function scheduleEnrollmentStep(
   const step = steps[idx];
   const action = STEP_TO_ACTION[step.step_type] ?? step.step_type;
 
-  const { data: accounts } = await sb
-    .from("linkedin_accounts")
-    .select("id")
-    .eq("user_id", campaign.user_id)
-    .eq("connection_status", "active")
-    .order("rotation_priority", { ascending: true })
-    .limit(1);
-
-  const accountId = accounts?.[0]?.id;
+  let accountId: string | undefined = forcedAccountId;
+  if (!accountId) {
+    const { data: accounts } = await sb
+      .from("linkedin_accounts")
+      .select("id")
+      .eq("user_id", campaign.user_id)
+      .eq("connection_status", "active")
+      .order("rotation_priority", { ascending: true })
+      .limit(1);
+    accountId = accounts?.[0]?.id;
+  }
   if (!accountId) return false;
 
   const isWait = action === "wait";
@@ -364,7 +367,8 @@ export async function createEnrollmentsAndSchedule(
   sb: SupabaseClient,
   redis: RedisClient,
   campaignId: string,
-  leadIds: string[]
+  leadIds: string[],
+  forcedAccountId?: string
 ): Promise<CreateEnrollmentsResult> {
   const result: CreateEnrollmentsResult = {
     tasks_scheduled: 0,
@@ -433,7 +437,7 @@ export async function createEnrollmentsAndSchedule(
       result.tasks_scheduled += reopened;
       if (reopened > 0) continue;
 
-      const ok = await scheduleEnrollmentStep(sb, redis, existing.id);
+      const ok = await scheduleEnrollmentStep(sb, redis, existing.id, forcedAccountId);
       if (ok) result.tasks_scheduled++;
       continue;
     }
@@ -453,7 +457,7 @@ export async function createEnrollmentsAndSchedule(
 
     if (error || !row) continue;
     result.enrollments_new++;
-    const ok = await scheduleEnrollmentStep(sb, redis, row.id);
+    const ok = await scheduleEnrollmentStep(sb, redis, row.id, forcedAccountId);
     if (ok) result.tasks_scheduled++;
   }
 

@@ -63,6 +63,14 @@ type Campaign = {
   workflow_edges?: unknown;
 };
 
+type LiAccount = {
+  id: string;
+  li_display_name: string | null;
+  li_headline: string | null;
+  li_photo_url: string | null;
+  connection_status: string;
+};
+
 function tabFromQuery(q: string | null): TabId {
   if (q && (TABS as readonly string[]).includes(q)) return q as TabId;
   return "leads";
@@ -97,6 +105,10 @@ export default function CampaignDetailPage() {
   const [drawerEnr, setDrawerEnr] = useState<EnrollmentRow | null>(null);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [analytics, setAnalytics] = useState<Record<string, unknown> | null>(null);
+
+  const [startModalOpen, setStartModalOpen] = useState(false);
+  const [liAccounts, setLiAccounts] = useState<LiAccount[]>([]);
+  const [selectedAccountId, setSelectedAccountId] = useState<string>("");
 
   const [nameDraft, setNameDraft] = useState("");
   const [skipOther, setSkipOther] = useState(false);
@@ -235,18 +247,30 @@ export default function CampaignDetailPage() {
     alert("Flujo guardado");
   }
 
+  async function openStartModal() {
+    if (!(await getValidAccessToken())) return;
+    const r = await api<{ accounts: LiAccount[] }>("/linkedin-accounts");
+    const active = (r.accounts ?? []).filter((a) => a.connection_status === "active");
+    setLiAccounts(active);
+    setSelectedAccountId(active[0]?.id ?? "");
+    setStartModalOpen(true);
+  }
+
   async function start() {
     if (!(await getValidAccessToken())) return;
+    setStartModalOpen(false);
     await api(`/campaigns/${campaignId}/steps`, {
       method: "PUT",
       body: JSON.stringify({ steps: stepsPayload(), workflow_edges: edges }),
     });
+    const body: Record<string, unknown> = {};
+    if (selectedAccountId) body.account_id = selectedAccountId;
     const r = await api<{
       leads: number;
       tasks_scheduled: number;
       enrollments_new: number;
       enrollments_existing: number;
-    }>(`/campaigns/${campaignId}/start`, { method: "POST", body: JSON.stringify({}) });
+    }>(`/campaigns/${campaignId}/start`, { method: "POST", body: JSON.stringify(body) });
     alert(
       `Campaña iniciada. Leads: ${r.leads}. Tareas: ${r.tasks_scheduled}. Nuevas inscripciones: ${r.enrollments_new}.`
     );
@@ -362,7 +386,7 @@ export default function CampaignDetailPage() {
             <button type="button" className="btn-secondary" onClick={() => void saveSteps()}>
               Guardar flujo
             </button>
-            <button type="button" className="btn-primary" onClick={() => void start()}>
+            <button type="button" className="btn-primary" onClick={() => void openStartModal()}>
               Iniciar
             </button>
             <button type="button" className="btn-secondary" onClick={() => void pause()}>
@@ -541,6 +565,71 @@ export default function CampaignDetailPage() {
         onUpdated={() => void loadEnrollments().catch(() => {})}
         onRefreshLeads={() => loadEnrollments()}
       />
+
+      {startModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
+          <div className="w-full max-w-sm rounded-xl border border-[var(--border)] bg-[var(--surface)] p-6 shadow-xl">
+            <h2 className="mb-4 text-base font-semibold text-[var(--text)]">Elegir cuenta para iniciar</h2>
+            {liAccounts.length === 0 ? (
+              <p className="text-sm text-[var(--muted)]">No hay cuentas LinkedIn activas. Conecta una en la sección Cuentas.</p>
+            ) : (
+              <div className="space-y-2">
+                {liAccounts.map((a) => (
+                  <label
+                    key={a.id}
+                    className={`flex cursor-pointer items-center gap-3 rounded-lg border p-3 transition-colors ${
+                      selectedAccountId === a.id
+                        ? "border-[var(--accent)] bg-[color-mix(in_srgb,var(--accent)_10%,var(--surface))]"
+                        : "border-[var(--border)] hover:border-[var(--accent)]/50"
+                    }`}
+                  >
+                    <input
+                      type="radio"
+                      name="start-account"
+                      value={a.id}
+                      checked={selectedAccountId === a.id}
+                      onChange={() => setSelectedAccountId(a.id)}
+                      className="accent-[var(--accent)]"
+                    />
+                    {a.li_photo_url ? (
+                      <img src={a.li_photo_url} alt="" className="h-8 w-8 rounded-full object-cover" />
+                    ) : (
+                      <div className="flex h-8 w-8 items-center justify-center rounded-full bg-[color-mix(in_srgb,var(--text)_10%,var(--surface))] text-xs font-bold text-[var(--muted)]">
+                        LI
+                      </div>
+                    )}
+                    <div className="min-w-0">
+                      <p className="truncate text-sm font-medium text-[var(--text)]">
+                        {a.li_display_name ?? a.id.slice(0, 8)}
+                      </p>
+                      {a.li_headline && (
+                        <p className="truncate text-xs text-[var(--muted)]">{a.li_headline}</p>
+                      )}
+                    </div>
+                  </label>
+                ))}
+              </div>
+            )}
+            <div className="mt-5 flex justify-end gap-2">
+              <button
+                type="button"
+                className="btn-secondary"
+                onClick={() => setStartModalOpen(false)}
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                className="btn-primary"
+                disabled={!selectedAccountId}
+                onClick={() => void start()}
+              >
+                Iniciar campaña
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

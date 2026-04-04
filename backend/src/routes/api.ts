@@ -1378,7 +1378,10 @@ export async function registerApiRoutes(app: FastifyInstance) {
 
   app.post("/campaigns/:id/start", async (req, reply) => {
     const id = (req.params as { id: string }).id;
-    const schema = z.object({ lead_ids: z.array(z.string().uuid()).optional() });
+    const schema = z.object({
+      lead_ids: z.array(z.string().uuid()).optional(),
+      account_id: z.string().uuid().optional(),
+    });
     const body = schema.parse(req.body ?? {});
 
     const { data: camp } = await sb
@@ -1433,7 +1436,7 @@ export async function registerApiRoutes(app: FastifyInstance) {
     }
 
     await sb.from("campaigns").update({ status: "active" }).eq("id", id);
-    const sched = await createEnrollmentsAndSchedule(sb, redis, id, leadIds);
+    const sched = await createEnrollmentsAndSchedule(sb, redis, id, leadIds, body.account_id);
     return {
       ok: true,
       leads: leadIds.length,
