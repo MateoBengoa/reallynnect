@@ -1383,6 +1383,7 @@ export async function registerApiRoutes(app: FastifyInstance) {
       account_id: z.string().uuid().optional(),
     });
     const body = schema.parse(req.body ?? {});
+    console.log(`[campaign:start] campaign=${id.slice(0,8)} forced_account=${body.account_id?.slice(0,8) ?? "none"}`);
 
     const { data: camp } = await sb
       .from("campaigns")

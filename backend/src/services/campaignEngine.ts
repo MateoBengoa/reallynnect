@@ -272,6 +272,8 @@ export async function scheduleEnrollmentStep(
     }
   }
 
+  console.log(`[campaignEngine] enrollment=${enrollmentId.slice(0,8)} step=${idx} action=${action} account=${accountId.slice(0,8)} forced=${forcedAccountId?.slice(0,8) ?? "no"}`);
+
   const payload: Record<string, unknown> = {
     step_id: step.id,
     message_template: step.message_template,
