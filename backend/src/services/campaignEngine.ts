@@ -129,7 +129,8 @@ export async function filterLeadIdsSkipContactedOtherCampaigns(
 async function resetOpenTasksForEnrollment(
   sb: SupabaseClient,
   redis: RedisClient,
-  enrollmentId: string
+  enrollmentId: string,
+  forcedAccountId?: string
 ): Promise<number> {
   const nowIso = new Date().toISOString();
   await sb.from("tasks").delete().eq("enrollment_id", enrollmentId).in("status", ["pending", "dead"]);
@@ -142,15 +143,14 @@ async function resetOpenTasksForEnrollment(
 
   let n = 0;
   for (const r of runningRows ?? []) {
-    await sb
-      .from("tasks")
-      .update({
-        status: "pending",
-        scheduled_at: nowIso,
-        locked_at: null,
-        error_message: "requeued_campaign_start",
-      })
-      .eq("id", r.id);
+    const patch: Record<string, unknown> = {
+      status: "pending",
+      scheduled_at: nowIso,
+      locked_at: null,
+      error_message: "requeued_campaign_start",
+    };
+    if (forcedAccountId) patch.account_id = forcedAccountId;
+    await sb.from("tasks").update(patch).eq("id", r.id);
     await enqueueTaskDue(redis, r.id, Date.now());
     n++;
   }
@@ -433,7 +433,7 @@ export async function createEnrollmentsAndSchedule(
       }
       await sb.from("campaign_enrollments").update(enPatch).eq("id", existing.id);
 
-      const reopened = await resetOpenTasksForEnrollment(sb, redis, existing.id);
+      const reopened = await resetOpenTasksForEnrollment(sb, redis, existing.id, forcedAccountId);
       result.tasks_scheduled += reopened;
       if (reopened > 0) continue;
 
