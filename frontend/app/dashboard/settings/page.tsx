@@ -177,6 +177,20 @@ export default function SettingsPage() {
     }
   }
 
+  async function removeAccount(accountId: string) {
+    const acc = accounts.find((a) => a.id === accountId);
+    const label = acc?.li_display_name ?? accountId.slice(0, 8);
+    if (!window.confirm(`¿Eliminar la cuenta "${label}"? Esta acción no se puede deshacer.`)) return;
+    if (!(await getValidAccessToken())) return;
+    try {
+      await api(`/linkedin-accounts/${accountId}`, { method: "DELETE" });
+      setMsg("Cuenta eliminada.");
+      await load();
+    } catch (e: unknown) {
+      setMsg(e instanceof Error ? e.message : "Error al eliminar la cuenta");
+    }
+  }
+
   async function syncPostsFromLinkedIn(accountId: string) {
     setMsg(null);
     if (!(await getValidAccessToken())) return;
@@ -250,9 +264,14 @@ export default function SettingsPage() {
                       {a.proxy_id && <span className="ml-2 text-green-400">· proxy ✓</span>}
                     </p>
                   </div>
-                  <button type="button" className="btn-secondary min-h-9 text-sm" onClick={() => syncPostsFromLinkedIn(a.id)}>
-                    Sincronizar posts
-                  </button>
+                  <div className="flex gap-2">
+                    <button type="button" className="btn-secondary min-h-9 text-sm" onClick={() => syncPostsFromLinkedIn(a.id)}>
+                      Sincronizar posts
+                    </button>
+                    <button type="button" className="btn-danger min-h-9 text-sm" onClick={() => void removeAccount(a.id)}>
+                      Eliminar
+                    </button>
+                  </div>
                 </div>
                 <label className="block text-xs font-medium text-[var(--muted)]">
                   Renovar cookie li_at (dejá vacío para no cambiarla)
