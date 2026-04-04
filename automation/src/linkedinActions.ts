@@ -1772,6 +1772,11 @@ export async function likeLeadRecentPost(page: Page, profileUrl: string): Promis
         if (/comment|comentar|share|compartir|send|enviar/.test(label) &&
             !/like|gusta|reaccionar|reacciones|recomendar/i.test(label)) continue;
 
+        // Nueva UI: "Estado del botón de reacción: ninguna reacción" es el botón like sin reaccionar
+        if (/estado del bot[oó]n de reacci[oó]n.*ninguna/i.test(label)) {
+          el.click();
+          return true;
+        }
         // Coincidencia por aria-label
         if (/like|me gusta|reaccionar|reacciones|recomendar|react/i.test(label)) {
           el.click();
@@ -1802,7 +1807,7 @@ export async function likeLeadRecentPost(page: Page, profileUrl: string): Promis
   if (!clicked) {
     // Fallback Playwright — cubre ambas generaciones de UI
     const likeBtn = inMain
-      .getByRole("button", { name: /^(Like|Me gusta|Reaccionar|Recomendar|Abrir el menú de reacciones)$/i })
+      .getByRole("button", { name: /Like|Me gusta|Reaccionar|Recomendar|Abrir el men[uú] de reacciones|Estado del bot[oó]n de reacci[oó]n.*ninguna/i })
       .first();
     if (await likeBtn.isVisible({ timeout: 6000 }).catch(() => false)) {
       await likeBtn.click({ timeout: 6000 }).catch(() => {});
