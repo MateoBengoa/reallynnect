@@ -222,15 +222,30 @@ export async function injectLiAt(page: Page, cookieValue: string): Promise<void>
   // Navigate directly to feed (authenticated).
   // Usamos "load" con timeout generoso; si LinkedIn va lento pero la cookie está
   // inyectada la sesión sigue siendo válida aunque el timeout se dispare.
-  try {
-    await page.goto("https://www.linkedin.com/feed/", { waitUntil: "domcontentloaded", timeout: 90000 });
-  } catch {
-    // Si la página no termina de cargar, verificamos que al menos llegamos a LinkedIn
-    const url = page.url();
-    if (!url.includes("linkedin.com")) {
-      throw new Error(`injectLiAt: navegación fallida — URL actual: ${url}`);
+  let lastNavErr: unknown;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      await page.goto("https://www.linkedin.com/feed/", { waitUntil: "domcontentloaded", timeout: 90000 });
+      lastNavErr = null;
+      break;
+    } catch (e) {
+      lastNavErr = e;
+      const url = page.url();
+      if (url.includes("linkedin.com")) {
+        // Cookie inyectada; LinkedIn cargó aunque lanzó timeout
+        lastNavErr = null;
+        break;
+      }
+      // about:blank o URL no-linkedin → reintento solo en primer intento
+      if (attempt === 0) {
+        await new Promise((r) => setTimeout(r, 3000));
+      }
     }
-    // Cookie ya está inyectada; el resto del flujo puede continuar
+  }
+  if (lastNavErr !== null) {
+    const url = page.url();
+    const reason = lastNavErr instanceof Error ? lastNavErr.message : String(lastNavErr);
+    throw new Error(`injectLiAt: navegación fallida — URL actual: ${url} — ${reason}`);
   }
 }
 
