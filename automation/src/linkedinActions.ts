@@ -1700,43 +1700,65 @@ export async function likeLeadRecentPost(page: Page, profileUrl: string): Promis
   await openProfilePostsSection(page);
 
   const inMain = page.locator("main");
-  await inMain
-    .locator(".feed-shared-update-v2")
-    .first()
-    .waitFor({ state: "visible", timeout: 22000 })
-    .catch(() => {});
+  // Esperar cualquier post — LinkedIn nuevo no usa feed-shared-update-v2
+  await Promise.race([
+    inMain.locator(".feed-shared-update-v2").first().waitFor({ state: "visible", timeout: 12000 }),
+    inMain.getByRole("button", { name: /Like|Me gusta|Reaccionar|Recomendar|Abrir el menú de reacciones/i }).first().waitFor({ state: "visible", timeout: 12000 }),
+  ]).catch(() => {});
 
   let clicked = await page.evaluate(() => {
     const root = document.querySelector("main");
     if (!root) return false;
-    const cards = root.querySelectorAll(".feed-shared-update-v2");
-    for (const card of cards) {
-      const btns = card.querySelectorAll("button");
+
+    function tryClickLikeInContainer(container: Element): boolean {
+      const btns = container.querySelectorAll("button");
       for (const b of btns) {
         const el = b as HTMLButtonElement;
         if (el.offsetParent === null) continue;
-        if (el.getAttribute("aria-pressed") === "true") continue;
+
         const label = (el.getAttribute("aria-label") || "").toLowerCase();
+        // Saltar botones ya likeados (aria-pressed o reacción activa)
+        if (el.getAttribute("aria-pressed") === "true") continue;
         if (/ya no me gusta|unlike|remove your like|quita tu reacción/.test(label)) continue;
-        if (/comment|comentar|share|compartir|send|enviar/.test(label) && !/like|gusta|reaccionar/i.test(label))
-          continue;
-        if (/like|me gusta|reaccionar|react/i.test(label)) {
+        // "Estado del botón de reacción" sin "ninguna reacción" = ya reaccionado
+        if (/estado del bot[oó]n de reacci[oó]n/.test(label) && !/ninguna reacci[oó]n/.test(label)) continue;
+
+        // Saltar botones que claramente no son like
+        if (/comment|comentar|share|compartir|send|enviar/.test(label) &&
+            !/like|gusta|reaccionar|reacciones|recomendar/i.test(label)) continue;
+
+        // Coincidencia por aria-label
+        if (/like|me gusta|reaccionar|reacciones|recomendar|react/i.test(label)) {
           el.click();
           return true;
         }
+        // Coincidencia por texto visible
         const t = (el.textContent || "").replace(/\s+/g, " ").trim().toLowerCase();
-        if (t === "like" || t === "me gusta") {
+        if (t === "like" || t === "me gusta" || t === "recomendar") {
           el.click();
           return true;
         }
       }
+      return false;
     }
-    return false;
+
+    // Intentar primero con tarjetas .feed-shared-update-v2 (UI antigua)
+    const cards = root.querySelectorAll(".feed-shared-update-v2");
+    if (cards.length > 0) {
+      for (const card of cards) {
+        if (tryClickLikeInContainer(card)) return true;
+      }
+    }
+
+    // UI nueva: buscar en toda la sección main directamente
+    return tryClickLikeInContainer(root);
   });
 
   if (!clicked) {
-    const card = inMain.locator(".feed-shared-update-v2").first();
-    const likeBtn = card.getByRole("button", { name: /Like|Me gusta|Reaccionar|React/i }).first();
+    // Fallback Playwright — cubre ambas generaciones de UI
+    const likeBtn = inMain
+      .getByRole("button", { name: /^(Like|Me gusta|Reaccionar|Recomendar|Abrir el menú de reacciones)$/i })
+      .first();
     if (await likeBtn.isVisible({ timeout: 6000 }).catch(() => false)) {
       await likeBtn.click({ timeout: 6000 }).catch(() => {});
       clicked = true;
