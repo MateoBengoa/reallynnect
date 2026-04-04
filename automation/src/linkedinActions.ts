@@ -676,6 +676,7 @@ async function clickConnectInOpenDropdown(page: Page): Promise<boolean> {
           '[class*="dropdown__content--is-open"]',
           ".artdeco-dropdown__content-inner",
           '[class*="artdeco-dropdown__content-inner"]',
+          '[role="menu"]',
         ].join(", ");
         for (const panel of document.querySelectorAll(panelSel)) {
           const p = panel as HTMLElement;
@@ -687,7 +688,7 @@ async function clickConnectInOpenDropdown(page: Page): Promise<boolean> {
           if (Number.isFinite(op) && op < 0.08) continue;
 
           for (const el of p.querySelectorAll(
-            'a[href*="custom-invite"], a[href*="preload/custom-invite"], [role="menuitem"]'
+            'a[href*="custom-invite"], a[href*="preload/custom-invite"], [role="menuitem"], [role="listitem"] a, li a'
           )) {
             const h = el as HTMLElement;
             const r = h.getBoundingClientRect();
@@ -710,15 +711,19 @@ async function clickConnectInOpenDropdown(page: Page): Promise<boolean> {
     .catch(() => {});
 
   const openPanel = page.locator(
-    '.artdeco-dropdown__content--is-open, [class*="dropdown__content--is-open"], .artdeco-dropdown__content-inner, [class*="artdeco-dropdown__content-inner"]'
+    '.artdeco-dropdown__content--is-open, [class*="dropdown__content--is-open"], .artdeco-dropdown__content-inner, [class*="artdeco-dropdown__content-inner"], [role="menu"]'
   );
 
   const scopedMenuItems = (inner: Locator): Locator[] => [
     inner.getByRole("menuitem", { name: /^Conectar$/ }),
     inner.getByRole("menuitem", { name: /^Connect$/ }),
+    inner.getByRole("menuitem", { name: /conectar|connect/i }),
     inner.locator('[role="menuitem"]').filter({ hasText: /^Conectar$/ }),
     inner.locator('[role="menuitem"]').filter({ hasText: /^Connect$/ }),
+    inner.locator('[role="menuitem"]').filter({ hasText: /conectar/i }),
     inner.locator('[role="menuitem"]').filter({ has: page.locator("svg#connect-small") }),
+    inner.locator('li').filter({ hasText: /^Conectar$/ }),
+    inner.locator('li').filter({ has: page.locator("svg#connect-small") }),
   ];
 
   for (let pi = 0; pi < Math.min(await openPanel.count(), 6); pi++) {
@@ -732,13 +737,18 @@ async function clickConnectInOpenDropdown(page: Page): Promise<boolean> {
   const menuLocators: Locator[] = [
     page.getByRole("menuitem", { name: /^Conectar$/ }),
     page.getByRole("menuitem", { name: /^Connect$/ }),
+    page.getByRole("menuitem", { name: /conectar|connect/i }),
     page.locator('[role="menuitem"]').filter({ hasText: /^Conectar$/ }),
     page.locator('[role="menuitem"]').filter({ hasText: /^Connect$/ }),
+    page.locator('[role="menuitem"]').filter({ hasText: /conectar/i }),
     page.locator('a[role="menuitem"][href*="custom-invite"]'),
     page.locator('a[role="menuitem"][href*="preload/custom-invite"]'),
     page.locator('.artdeco-dropdown__content--is-open a[href*="custom-invite"]'),
     page.locator('[class*="dropdown__content--is-open"] a[href*="custom-invite"]'),
     page.locator('.artdeco-dropdown__content-inner a[href*="custom-invite"]'),
+    page.locator('[role="menu"] a[href*="custom-invite"]'),
+    page.locator('[role="menu"] li').filter({ hasText: /^Conectar$/i }),
+    page.locator('[role="menu"] li').filter({ has: page.locator("svg#connect-small") }),
     page.locator('[role="menuitem"]').filter({ has: page.locator("svg#connect-small") }),
   ];
   for (const group of menuLocators) {
@@ -780,9 +790,9 @@ async function clickConnectInOpenDropdown(page: Page): Promise<boolean> {
       const al = (el.getAttribute("aria-label") || "").toLowerCase();
       const hay = `${text} ${al}`;
       if (/pendiente|pending|requested|invitación enviada|invitation sent/i.test(hay)) return false;
-      if (hasIcon && (/^conectar$/i.test(text) || /^connect$/i.test(text) || /conectar|connect|invita|invite/.test(hay)))
-        return true;
+      if (hasIcon && /conectar|connect|invita|invite/i.test(hay)) return true;
       if (/^conectar$/i.test(text) || /^connect$/i.test(text)) return true;
+      if (/^conectar\s+con\s+/i.test(text) || /^connect\s+with\s+/i.test(text)) return true;
       return false;
     };
 
@@ -792,7 +802,7 @@ async function clickConnectInOpenDropdown(page: Page): Promise<boolean> {
     };
 
     const panels = document.querySelectorAll(
-      '.artdeco-dropdown__content--is-open, [class*="dropdown__content--is-open"], .artdeco-dropdown__content-inner, [class*="artdeco-dropdown__content-inner"]'
+      '.artdeco-dropdown__content--is-open, [class*="dropdown__content--is-open"], .artdeco-dropdown__content-inner, [class*="artdeco-dropdown__content-inner"], [role="menu"]'
     );
     for (const panel of panels) {
       const p = panel as HTMLElement;
@@ -815,15 +825,29 @@ async function clickConnectInOpenDropdown(page: Page): Promise<boolean> {
 
       for (const svg of p.querySelectorAll("svg#connect-small")) {
         const row =
-          (svg as HTMLElement).closest('[role="menuitem"]') ?? (svg as HTMLElement).closest("a");
+          (svg as HTMLElement).closest('[role="menuitem"]') ??
+          (svg as HTMLElement).closest("li") ??
+          (svg as HTMLElement).closest("a");
         if (!row || !visibleEnough(row as HTMLElement)) continue;
         const t = ((row as HTMLElement).textContent || "").replace(/\s+/g, " ").trim();
         const al = ((row as HTMLElement).getAttribute("aria-label") || "").toLowerCase();
-        const okText = /^conectar$/i.test(t) || /^connect$/i.test(t);
-        const okAria =
-          /invita.*a conectar|invite.*to connect|\bconectar\b|\bconnect\b/i.test(`${t} ${al}`);
+        const okText = /conectar|connect/i.test(t);
+        const okAria = /invita.*a conectar|invite.*to connect|\bconectar\b|\bconnect\b/i.test(`${t} ${al}`);
         if (!okText && !okAria) continue;
         clickEl(row as HTMLElement);
+        return true;
+      }
+
+      // New LinkedIn UI: list items without role="menuitem"
+      for (const li of p.querySelectorAll("li")) {
+        const el = li as HTMLElement;
+        if (!visibleEnough(el)) continue;
+        const t = (el.textContent || "").replace(/\s+/g, " ").trim();
+        if (!/conectar|connect/i.test(t)) continue;
+        if (/pendiente|pending|requested|retirar|withdraw/i.test(t)) continue;
+        // Click the inner <a> or <button> if present, else the li itself
+        const inner = el.querySelector("a, button") as HTMLElement | null;
+        clickEl(inner ?? el);
         return true;
       }
     }
@@ -1673,9 +1697,11 @@ export async function replyToCommentOnLeadRecentPost(
   return { ok: true };
 }
 
-async function openProfilePostsSection(page: Page): Promise<void> {
+async function openProfilePostsSection(page: Page, profileUrl?: string): Promise<void> {
   const fast = process.env.LINKEDIN_FAST_AUTOMATION === "true";
   const main = page.locator("main");
+
+  // UI antigua: tabs con role="tab"
   const tabs = main.getByRole("tab", { name: /Posts|Publicaciones|Activity|Actividad/i });
   const n = await tabs.count().catch(() => 0);
   for (let i = 0; i < Math.min(n, 6); i++) {
@@ -1683,10 +1709,29 @@ async function openProfilePostsSection(page: Page): Promise<void> {
     if (await t.isVisible({ timeout: 1500 }).catch(() => false)) {
       await t.click({ timeout: 5000 }).catch(() => {});
       await randomDelay(fast ? 400 : 1000, fast ? 900 : 2400);
-      break;
+      return;
     }
   }
-  await page.evaluate(() => window.scrollTo(0, Math.min(480, document.body.scrollHeight * 0.15)));
+
+  // UI nueva: link href .../recent-activity/all/ en la sección Actividad
+  const activityLink = page.locator('a[href*="recent-activity/all"]').first();
+  if (await activityLink.isVisible({ timeout: 3000 }).catch(() => false)) {
+    await activityLink.click({ timeout: 5000 }).catch(() => {});
+    await page.waitForLoadState("domcontentloaded", { timeout: 20000 }).catch(() => {});
+    await randomDelay(fast ? 600 : 1200, fast ? 1200 : 2500);
+    return;
+  }
+
+  // Fallback: navegar directamente a recent-activity si tenemos la URL del perfil
+  if (profileUrl) {
+    const base = profileUrl.replace(/\/$/, "");
+    await page.goto(`${base}/recent-activity/all/`, { waitUntil: "domcontentloaded", timeout: 30000 }).catch(() => {});
+    await randomDelay(fast ? 600 : 1000, fast ? 1200 : 2000);
+    return;
+  }
+
+  // Último recurso: scroll suave para forzar lazy-load de posts
+  await page.evaluate(() => window.scrollTo(0, Math.min(800, document.body.scrollHeight * 0.3)));
   await randomDelay(fast ? 400 : 900, fast ? 800 : 2000);
 }
 
@@ -1697,7 +1742,7 @@ export async function likeLeadRecentPost(page: Page, profileUrl: string): Promis
   await ensureProfilePageLoaded(page, profileUrl);
   await scrollProfileTopCardIntoView(page);
   await randomDelay(500, 1200);
-  await openProfilePostsSection(page);
+  await openProfilePostsSection(page, profileUrl);
 
   const inMain = page.locator("main");
   // Esperar cualquier post — LinkedIn nuevo no usa feed-shared-update-v2
@@ -1784,7 +1829,7 @@ export async function commentLeadRecentPost(page: Page, profileUrl: string, comm
   await ensureProfilePageLoaded(page, profileUrl);
   await scrollProfileTopCardIntoView(page);
   await randomDelay(500, 1200);
-  await openProfilePostsSection(page);
+  await openProfilePostsSection(page, profileUrl);
 
   const inMain = page.locator("main");
   await inMain.locator(".feed-shared-update-v2").first().waitFor({ state: "visible", timeout: 22000 }).catch(() => {});
