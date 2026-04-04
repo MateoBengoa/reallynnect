@@ -222,6 +222,22 @@ export async function scheduleEnrollmentStep(
   const action = STEP_TO_ACTION[step.step_type] ?? step.step_type;
 
   let accountId: string | undefined = forcedAccountId;
+
+  // Si no hay cuenta forzada, intentar reutilizar la misma cuenta del paso anterior
+  // del mismo enrollment para mantener consistencia a lo largo de toda la secuencia.
+  if (!accountId) {
+    const { data: prevTask } = await sb
+      .from("tasks")
+      .select("account_id")
+      .eq("enrollment_id", enrollmentId)
+      .in("status", ["completed", "pending", "running"])
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    accountId = (prevTask?.account_id as string | undefined) ?? undefined;
+  }
+
+  // Fallback: cuenta activa con mayor prioridad de rotación
   if (!accountId) {
     const { data: accounts } = await sb
       .from("linkedin_accounts")
