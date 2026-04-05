@@ -1270,25 +1270,60 @@ export async function sendConnectionRequest(
     }
   }
 
+  // Fallback final: clic forzado en Más por geometría + buscar Conectar en CUALQUIER lugar de la página
   if (!clicked) {
-    const bar = profileTopActionBar(page);
-    const bar2 = profileTopActionBarFallback(page);
-    const barW = profileTopActionBarWide(page);
-    let more = bar.getByRole("button", { name: /^Más$|^More$|more|más/i }).first();
-    if (!(await more.isVisible({ timeout: 600 }).catch(() => false))) {
-      more = bar2.getByRole("button", { name: /^Más$|^More$|more|más/i }).first();
-    }
-    if (!(await more.isVisible({ timeout: 600 }).catch(() => false))) {
-      more = barW.getByRole("button", { name: /^Más$|^More$|more|más/i }).first();
-    }
-    if (await more.isVisible({ timeout: 4000 }).catch(() => false)) {
-      await more
-        .evaluate((node) =>
-          (node as HTMLElement).scrollIntoView({ block: "nearest", inline: "nearest" })
-        )
-        .catch(() => {});
-      await more.click({ timeout: 5000 }).catch(() => {});
-      clicked = await clickConnectInOpenDropdown(page);
+    const masClicked = await page.evaluate(() => {
+      const vh = window.innerHeight;
+      const maxY = vh * 0.65;
+      // Buscar botón Más en todo el documento por geometría
+      const candidates: { el: HTMLButtonElement; top: number }[] = [];
+      for (const b of document.querySelectorAll("button")) {
+        const el = b as HTMLButtonElement;
+        if (el.offsetParent === null) continue;
+        const lb = (el.getAttribute("aria-label") || "").toLowerCase().trim();
+        const hasSvg = !!el.querySelector("svg#overflow-web-ios-small");
+        if (!hasSvg && lb !== "más" && lb !== "more") continue;
+        const r = el.getBoundingClientRect();
+        if (r.width < 2 || r.height < 2 || r.top < 0 || r.top > maxY) continue;
+        if (el.closest("[data-urn], .feed-shared-update-v2, article")) continue;
+        candidates.push({ el, top: r.top });
+      }
+      candidates.sort((a, b) => a.top - b.top);
+      if (candidates.length === 0) return false;
+      candidates[0]!.el.scrollIntoView({ block: "nearest", inline: "nearest" });
+      candidates[0]!.el.click();
+      return true;
+    });
+
+    if (masClicked) {
+      await randomDelay(1200, 2200);
+      // Buscar Conectar en CUALQUIER parte de la página (independiente de estructura de dropdown)
+      clicked = await page.evaluate(() => {
+        const isVisible = (el: HTMLElement) => {
+          if (!el.offsetParent && el.tagName !== "BODY") return false;
+          const r = el.getBoundingClientRect();
+          if (r.width < 2 || r.height < 2) return false;
+          const st = window.getComputedStyle(el);
+          return st.visibility !== "hidden" && st.display !== "none" && parseFloat(st.opacity) > 0.05;
+        };
+        for (const el of document.querySelectorAll("a, button, [role='menuitem'], li")) {
+          const h = el as HTMLElement;
+          if (!isVisible(h)) continue;
+          const text = (h.textContent || "").replace(/\s+/g, " ").trim();
+          const label = (h.getAttribute("aria-label") || "").toLowerCase();
+          const href = (h.getAttribute("href") || "").toLowerCase();
+          if (/pendiente|pending|requested|retirar|withdraw/i.test(`${text} ${label}`)) continue;
+          if (/^conectar$/i.test(text) || /^connect$/i.test(text) ||
+              /^conectar\s+con\s+/i.test(text) || href.includes("custom-invite")) {
+            h.scrollIntoView({ block: "nearest", inline: "nearest" });
+            h.click();
+            return true;
+          }
+        }
+        return false;
+      });
+
+      if (!clicked) clicked = await clickConnectInOpenDropdown(page);
       if (!clicked) clicked = await clickConnectRobust(page);
     }
   }
