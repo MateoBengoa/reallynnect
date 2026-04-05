@@ -8,10 +8,18 @@ const INTERVAL_MS = Number(process.env.WORKER_POLL_MS ?? 8000);
 async function main() {
   const sb = getSupabaseAdmin();
   const redis = getRedis();
+  // Siempre resetear el contador de slots al arrancar — si el proceso anterior
+  // murió sin liberar slots (crash, SIGKILL, pm2 restart) el contador Redis
+  // queda elevado y ninguna tarea consigue slot hasta que se reinicia manualmente.
   if (isMemoryRedis(redis)) {
     resetMemoryBrowserSlotCounter();
-    console.log("[worker] Cola en memoria: contador de navegadores reiniciado (evita slots colgados tras cierre brusco).");
+  } else {
+    await (redis as import("ioredis").Redis).set(
+      (await import("../queues/redisClient.js")).BROWSER_SLOT_KEY,
+      "0"
+    ).catch(() => {});
   }
+  console.log("[worker] Contador de slots de navegador reiniciado a 0.");
   console.log("automation worker started, poll", INTERVAL_MS, "ms");
   console.log(
     "[worker] .env desde paquete backend | headless=",

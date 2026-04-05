@@ -57,10 +57,29 @@ export async function visitProfile(page: Page, profileUrl: string, options?: Vis
   const fast = process.env.LINKEDIN_FAST_AUTOMATION === "true";
   const light = options?.light === true;
   await randomDelay(fast ? 800 : 15000, light ? 1200 : fast ? 2500 : 35000);
-  await page.goto(url, { waitUntil: "domcontentloaded", timeout: 90000 });
+
+  // Intentar navegar con reintento en caso de timeout de red
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      await page.goto(url, { waitUntil: "domcontentloaded", timeout: 90000 });
+      break;
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      const isNetErr = /ERR_TIMED_OUT|ERR_NAME_NOT_RESOLVED|ERR_CONNECTION|ERR_NETWORK|net::/i.test(msg);
+      if (!isNetErr || attempt === 1) {
+        return { ok: false, error: "navigation_timeout" };
+      }
+      await new Promise((r) => setTimeout(r, 5000));
+    }
+  }
+
   await lightMouseJitter(page);
   if (navigatedToFeedOrActivity(page.url())) {
-    await page.goto(url, { waitUntil: "domcontentloaded", timeout: 90000 });
+    try {
+      await page.goto(url, { waitUntil: "domcontentloaded", timeout: 90000 });
+    } catch {
+      return { ok: false, error: "navigation_timeout" };
+    }
     await lightMouseJitter(page);
     if (navigatedToFeedOrActivity(page.url())) {
       return { ok: false, error: "profile_redirect_to_feed" };
@@ -109,15 +128,20 @@ function profileTopActionBarWide(page: Page): Locator {
 async function clickProfileHeaderOverflowByGeometry(page: Page): Promise<boolean> {
   return page.evaluate(() => {
     const vh = window.innerHeight;
-    const maxY = vh * 0.5;
+    const maxY = vh * 0.92;
     const hits: { el: HTMLButtonElement; top: number }[] = [];
     // Buscar en todo el documento — en nuevo UI el top card está antes de <main>
     for (const b of document.querySelectorAll("button")) {
       const el = b as HTMLButtonElement;
-      if (!el.querySelector("svg#overflow-web-ios-small")) continue;
       if (!el.offsetParent) continue;
       const r = el.getBoundingClientRect();
       if (r.width < 2 || r.height < 2 || r.bottom < 0 || r.top > maxY) continue;
+      if (el.closest("[data-urn], .feed-shared-update-v2, article")) continue;
+      // Nuevo UI: detectar por svg#overflow-web-ios-small O por texto "Más"/"More"
+      const hasSvg = !!el.querySelector("svg#overflow-web-ios-small");
+      const text = (el.textContent || "").replace(/\s+/g, " ").trim();
+      const lb = (el.getAttribute("aria-label") || "").trim();
+      if (!hasSvg && !/^más$/i.test(text) && !/^more$/i.test(text) && !/^más$/i.test(lb) && !/^more$/i.test(lb)) continue;
       hits.push({ el, top: r.top });
     }
     hits.sort((a, b) => a.top - b.top);
@@ -151,7 +175,17 @@ export async function ensureProfilePageLoaded(page: Page, profileUrl: string): P
   const u = page.url().toLowerCase();
   const onProfile = vanity ? u.includes(`/in/${vanity}`) : path.length > 1 && u.includes(path);
   if (onProfile) return;
-  await page.goto(norm, { waitUntil: "domcontentloaded", timeout: 90000 });
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      await page.goto(norm, { waitUntil: "domcontentloaded", timeout: 90000 });
+      break;
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      const isNetErr = /ERR_TIMED_OUT|ERR_NAME_NOT_RESOLVED|ERR_CONNECTION|ERR_NETWORK|net::/i.test(msg);
+      if (!isNetErr || attempt === 1) throw new Error("navigation_timeout");
+      await new Promise((r) => setTimeout(r, 5000));
+    }
+  }
   await lightMouseJitter(page);
   await randomDelay(400, 1100);
 }
@@ -267,7 +301,7 @@ async function openProfileOverflowMenu(page: Page): Promise<boolean> {
             const h = node as HTMLElement;
             // Nuevo UI: top card está antes de <main>; verificar solo por geometría
             const r = h.getBoundingClientRect();
-            if (r.width < 2 || r.height < 2 || r.bottom < 0 || r.top > window.innerHeight * 0.55) return false;
+            if (r.width < 2 || r.height < 2 || r.bottom < 0 || r.top > window.innerHeight * 0.92) return false;
             // No clickar botones de posts/feed
             if (h.closest("[data-urn], .feed-shared-update-v2, article")) return false;
             return true;
@@ -288,10 +322,10 @@ async function openProfileOverflowMenu(page: Page): Promise<boolean> {
 
   const opened = await page.evaluate(() => {
     const vh = window.innerHeight;
-    const maxY = vh * 0.55;
+    const maxY = vh * 0.92;
 
     // En el nuevo UI de LinkedIn, los botones de acción del perfil están ANTES de <main>.
-    // Por eso buscamos en todo el documento, filtrando por posición en top card (mitad superior).
+    // Por eso buscamos en todo el documento, filtrando por posición en top card (90% viewport).
     const isInTopCard = (el: HTMLElement): boolean => {
       const r = el.getBoundingClientRect();
       if (r.width < 2 || r.height < 2 || r.bottom < 0 || r.top > maxY) return false;
@@ -300,7 +334,7 @@ async function openProfileOverflowMenu(page: Page): Promise<boolean> {
       return true;
     };
 
-    // 1. Buscar por svg#overflow-web-ios-small en todo el documento
+    // 1. Buscar por svg#overflow-web-ios-small en todo el documento (UI viejo)
     const hits: { el: HTMLButtonElement; top: number }[] = [];
     for (const b of document.querySelectorAll("button")) {
       const el = b as HTMLButtonElement;
@@ -330,7 +364,20 @@ async function openProfileOverflowMenu(page: Page): Promise<boolean> {
       }
     }
 
-    // 3. Buscar artdeco-dropdown__trigger en top card
+    // 3. Nuevo UI: botón "Más" sin aria-label, solo texto — buscar por textContent
+    for (const b of document.querySelectorAll("button")) {
+      const el = b as HTMLButtonElement;
+      if (el.offsetParent === null) continue;
+      if (!isInTopCard(el)) continue;
+      const text = (el.textContent || "").replace(/\s+/g, " ").trim();
+      if (/^más$/i.test(text) || /^more$/i.test(text)) {
+        el.scrollIntoView({ block: "nearest", inline: "nearest" });
+        el.click();
+        return true;
+      }
+    }
+
+    // 4. Buscar artdeco-dropdown__trigger en top card
     for (const b of document.querySelectorAll("button.artdeco-dropdown__trigger")) {
       const el = b as HTMLButtonElement;
       if (el.offsetParent === null) continue;
@@ -1253,7 +1300,8 @@ export async function sendConnectionRequest(
   profileUrl: string,
   note?: string
 ): Promise<ActionResult> {
-  await visitProfile(page, profileUrl, { light: true });
+  const vr = await visitProfile(page, profileUrl, { light: true });
+  if (!vr.ok) return vr;
   await ensureProfilePageLoaded(page, profileUrl);
   await scrollProfileTopCardIntoView(page);
   await randomDelay(500, 1200);
@@ -1274,15 +1322,17 @@ export async function sendConnectionRequest(
   if (!clicked) {
     const masClicked = await page.evaluate(() => {
       const vh = window.innerHeight;
-      const maxY = vh * 0.65;
+      const maxY = vh * 0.92;
       // Buscar botón Más en todo el documento por geometría
       const candidates: { el: HTMLButtonElement; top: number }[] = [];
       for (const b of document.querySelectorAll("button")) {
         const el = b as HTMLButtonElement;
         if (el.offsetParent === null) continue;
         const lb = (el.getAttribute("aria-label") || "").toLowerCase().trim();
+        const text = (el.textContent || "").replace(/\s+/g, " ").trim().toLowerCase();
         const hasSvg = !!el.querySelector("svg#overflow-web-ios-small");
-        if (!hasSvg && lb !== "más" && lb !== "more") continue;
+        // Nuevo UI: sin aria-label, sin SVG → detectar por texto "Más"
+        if (!hasSvg && lb !== "más" && lb !== "more" && text !== "más" && text !== "more") continue;
         const r = el.getBoundingClientRect();
         if (r.width < 2 || r.height < 2 || r.top < 0 || r.top > maxY) continue;
         if (el.closest("[data-urn], .feed-shared-update-v2, article")) continue;
@@ -1312,12 +1362,15 @@ export async function sendConnectionRequest(
           const text = (h.textContent || "").replace(/\s+/g, " ").trim();
           const href = (h.getAttribute("href") || "").toLowerCase();
           if (href.includes("custom-invite")) return true;
+          // Nuevo UI: <div aria-label="Invita a X a conectar"> con svg#connect-small
+          const ariaLabel = (h.getAttribute("aria-label") || "").toLowerCase();
+          if (/conectar|connect/i.test(ariaLabel) && h.querySelector("svg#connect-small")) return true;
           if (/^conectar$/i.test(text) || /^connect$/i.test(text) ||
               /^conectar\s+con\s+/i.test(text)) {
-            // Verificar que sea un elemento clickable (no solo un contenedor)
+            // Verificar que sea un elemento clickable (no solo un contenedor de texto)
             const tag = h.tagName.toLowerCase();
             const role = (h.getAttribute("role") || "").toLowerCase();
-            if (["a", "button", "li"].includes(tag) || ["button", "menuitem", "option", "link"].includes(role)) {
+            if (["a", "button", "li", "div"].includes(tag) || ["button", "menuitem", "option", "link"].includes(role)) {
               return true;
             }
           }
@@ -1334,6 +1387,21 @@ export async function sendConnectionRequest(
           const st = window.getComputedStyle(el);
           return st.visibility !== "hidden" && st.display !== "none" && parseFloat(st.opacity) > 0.05;
         };
+
+        // Prioridad 1: div con svg#connect-small (nuevo UI ProfilePostConnectDrawer)
+        for (const el of document.querySelectorAll("div")) {
+          const h = el as HTMLElement;
+          if (!isVisible(h)) continue;
+          const ariaLabel = (h.getAttribute("aria-label") || "").toLowerCase();
+          if (/conectar|connect/i.test(ariaLabel) && h.querySelector("svg#connect-small")) {
+            if (/pendiente|pending|requested|retirar|withdraw/i.test(ariaLabel)) continue;
+            h.scrollIntoView({ block: "nearest", inline: "nearest" });
+            h.click();
+            return true;
+          }
+        }
+
+        // Prioridad 2: resto de elementos clickables
         for (const el of document.querySelectorAll("a, button, li, [role='menuitem'], [role='button'], [role='option'], div")) {
           const h = el as HTMLElement;
           if (!isVisible(h)) continue;
@@ -1369,7 +1437,8 @@ export async function sendConnectionRequest(
 
   await randomDelay(500, 1100);
   if (navigatedToFeedOrActivity(page.url())) {
-    await visitProfile(page, profileUrl, { light: true });
+    const vr2 = await visitProfile(page, profileUrl, { light: true });
+    if (!vr2.ok) return vr2;
     await ensureProfilePageLoaded(page, profileUrl);
     await scrollProfileTopCardIntoView(page);
     const gx = await guardSoftban(page);
@@ -1473,7 +1542,8 @@ async function openMessagingComposeFromProfile(
   skipProfileVisit?: boolean
 ): Promise<ActionResult | null> {
   if (!skipProfileVisit) {
-    await visitProfile(page, profileUrl, { light: true });
+    const vr = await visitProfile(page, profileUrl, { light: true });
+    if (!vr.ok) return vr;
     await ensureProfilePageLoaded(page, profileUrl);
   } else {
     await ensureProfilePageLoaded(page, profileUrl);
