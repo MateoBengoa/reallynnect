@@ -53,6 +53,20 @@ import { parseLinkedInInboxListTime } from "../lib/linkedinInboxListTime.js";
 
 const MAX_ATTEMPTS = 5;
 
+/** Sustituye placeholders del paso; no recorta ni altera el resto del texto del usuario. */
+function applyCampaignMessageTemplate(template: string, payload: Record<string, unknown>): string {
+  return template
+    .replace(/\{name\}/gi, String(payload.lead_name ?? ""))
+    .replace(/\{company\}/gi, String(payload.lead_company ?? ""))
+    .replace(/\{title\}/gi, String(payload.lead_title ?? ""))
+    .replace(/\{headline\}/gi, String(payload.lead_headline ?? ""));
+}
+
+function userProvidedMessageTemplate(payload: Record<string, unknown>): boolean {
+  const t = payload.message_template;
+  return typeof t === "string" && t.trim().length > 0;
+}
+
 async function persistLeadProfilePhotoFromOpenPage(
   sb: SupabaseClient,
   page: Page,
@@ -2625,20 +2639,19 @@ export async function runOneTask(sb: SupabaseClient, redis: RedisClient, taskId:
       const capCheck = await checkCaps(redis, accountId, "message", accountDailyCap(account, "message"), task.attempts as number);
       if (!capCheck.ok) { await applyCapReschedule(sb, redis, taskId, task.attempts as number, capCheck.rescheduleMs, capCheck.reason); return; }
       const profileUrl = String(payload.profile_url ?? "");
-      const tmpl = (payload.message_template as string | undefined) ?? "";
-      let commentText = tmpl
-        .replace(/\{name\}/gi, String(payload.lead_name ?? ""))
-        .replace(/\{company\}/gi, String(payload.lead_company ?? ""))
-        .trim();
-      if (!commentText) {
+      let commentText: string;
+      if (userProvidedMessageTemplate(payload)) {
+        commentText = applyCampaignMessageTemplate(String(payload.message_template), payload).slice(0, 3000);
+      } else {
         commentText = process.env.GEMINI_API_KEY
           ? await generateDmReply(
               String(payload.lead_name ?? "post"),
               `Comment on post by ${payload.lead_name ?? ""} from ${payload.lead_company ?? ""}`
             )
           : "👍 Great post!";
+        commentText = commentText.slice(0, 3000);
       }
-      const r = await commentLeadRecentPost(page, profileUrl, commentText.slice(0, 3000));
+      const r = await commentLeadRecentPost(page, profileUrl, commentText);
       if (r.softban) {
         await pauseAccountSoftban(sb, accountId);
         await fail("softban");
@@ -2660,10 +2673,7 @@ export async function runOneTask(sb: SupabaseClient, redis: RedisClient, taskId:
       let note = payload.note as string | undefined;
       const tmpl = payload.message_template as string | undefined;
       if (tmpl && tmpl.includes("{")) {
-        note = tmpl
-          .replace(/\{name\}/gi, String(payload.lead_name ?? ""))
-          .replace(/\{company\}/gi, String(payload.lead_company ?? ""))
-          .slice(0, 300);
+        note = applyCampaignMessageTemplate(tmpl, payload).slice(0, 300);
       } else if (!note && process.env.GEMINI_API_KEY) {
         note = await generateConnectionMessage({
           name: payload.lead_name as string,
@@ -2690,17 +2700,9 @@ export async function runOneTask(sb: SupabaseClient, redis: RedisClient, taskId:
       const capCheck = await checkCaps(redis, accountId, "message", accountDailyCap(account, "message"), task.attempts as number);
       if (!capCheck.ok) { await applyCapReschedule(sb, redis, taskId, task.attempts as number, capCheck.rescheduleMs, capCheck.reason); return; }
       const profileUrl = String(payload.profile_url ?? "");
-      let text =
-        (payload.message_template as string | undefined)?.replace(/\{name\}/gi, String(payload.lead_name ?? "")) ??
-        "Hi, thanks for connecting.";
-      if (process.env.GEMINI_API_KEY && text.length < 20) {
-        text = await generateConnectionMessage({
-          name: payload.lead_name as string,
-          company: payload.lead_company as string,
-          title: payload.lead_title as string,
-          objective: "follow-up after connect",
-        });
-      }
+      const text = userProvidedMessageTemplate(payload)
+        ? applyCampaignMessageTemplate(String(payload.message_template), payload)
+        : "Hi, thanks for connecting.";
       const r = await sendMessageToProfile(page, profileUrl, text);
       if (r.softban) {
         await pauseAccountSoftban(sb, accountId);
@@ -2720,17 +2722,9 @@ export async function runOneTask(sb: SupabaseClient, redis: RedisClient, taskId:
       const capCheck = await checkCaps(redis, accountId, "message", accountDailyCap(account, "message"), task.attempts as number);
       if (!capCheck.ok) { await applyCapReschedule(sb, redis, taskId, task.attempts as number, capCheck.rescheduleMs, capCheck.reason); return; }
       const profileUrl = String(payload.profile_url ?? "");
-      let text =
-        (payload.message_template as string | undefined)?.replace(/\{name\}/gi, String(payload.lead_name ?? "")) ??
-        "Hi, thanks for connecting.";
-      if (process.env.GEMINI_API_KEY && text.length < 20) {
-        text = await generateConnectionMessage({
-          name: payload.lead_name as string,
-          company: payload.lead_company as string,
-          title: payload.lead_title as string,
-          objective: "follow-up after connect",
-        });
-      }
+      const text = userProvidedMessageTemplate(payload)
+        ? applyCampaignMessageTemplate(String(payload.message_template), payload)
+        : "Hi, thanks for connecting.";
       const r = await sendMessageToOpenProfile(page, profileUrl, text);
       if (r.softban) {
         await pauseAccountSoftban(sb, accountId);
@@ -2793,20 +2787,19 @@ export async function runOneTask(sb: SupabaseClient, redis: RedisClient, taskId:
       const capCheck = await checkCaps(redis, accountId, "message", accountDailyCap(account, "message"), task.attempts as number);
       if (!capCheck.ok) { await applyCapReschedule(sb, redis, taskId, task.attempts as number, capCheck.rescheduleMs, capCheck.reason); return; }
       const profileUrl = String(payload.profile_url ?? "");
-      const tmpl = (payload.message_template as string | undefined) ?? "";
-      let text = tmpl
-        .replace(/\{name\}/gi, String(payload.lead_name ?? ""))
-        .replace(/\{company\}/gi, String(payload.lead_company ?? ""))
-        .trim();
-      if (!text) {
+      let text: string;
+      if (userProvidedMessageTemplate(payload)) {
+        text = applyCampaignMessageTemplate(String(payload.message_template), payload).slice(0, 3000);
+      } else {
         text = process.env.GEMINI_API_KEY
           ? await generateDmReply(
               String(payload.lead_name ?? "comment"),
               `Reply to comment by ${payload.lead_name ?? ""} from ${payload.lead_company ?? ""}`
             )
           : "Thanks for your comment!";
+        text = text.slice(0, 3000);
       }
-      const r = await replyToCommentOnLeadRecentPost(page, profileUrl, text.slice(0, 3000));
+      const r = await replyToCommentOnLeadRecentPost(page, profileUrl, text);
       if (r.softban) {
         await pauseAccountSoftban(sb, accountId);
         await fail("softban");

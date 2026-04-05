@@ -1880,19 +1880,26 @@ export async function sendMessageToProfile(
   await box.click({ timeout: 8000 }).catch(() => {});
   await randomDelay(300, 600);
 
+  const chunk = text.slice(0, 8000);
   const tag = (await box.evaluate((n) => n.tagName).catch(() => "")) || "";
   if (tag.toLowerCase() === "textarea" || tag.toLowerCase() === "input") {
-    await box.fill(text.slice(0, 8000), { timeout: 15000 });
+    await box.fill(chunk, { timeout: 15000 });
   } else {
-    // contenteditable div — usar type() para activar los event handlers de React/Ember
-    await box.fill("", { timeout: 10000 }).catch(() => {});
-    await box.type(text.slice(0, 8000), { delay: 20 }).catch(async () => {
-      // fallback: inyectar via evaluate
-      await box.evaluate((el, t) => {
-        (el as HTMLElement).textContent = t;
-        el.dispatchEvent(new InputEvent("input", { bubbles: true, data: t }));
-      }, text.slice(0, 8000)).catch(() => {});
-    });
+    // contenteditable: fill() respeta el texto literal; alternativas si LinkedIn no dispara React
+    try {
+      await box.fill("", { timeout: 5000 });
+      await box.fill(chunk, { timeout: 20000 });
+    } catch {
+      try {
+        await box.pressSequentially(chunk, { delay: 0, timeout: 180_000 });
+      } catch {
+        await box.evaluate((el, t) => {
+          const h = el as HTMLElement;
+          h.textContent = t;
+          h.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: t || null }));
+        }, chunk);
+      }
+    }
   }
 
   await randomDelay(800, 2000);
@@ -1962,13 +1969,21 @@ export async function sendMessageInMessagingThread(page: Page, threadIdOrUrl: st
   await box.scrollIntoViewIfNeeded().catch(() => {});
   await box.click({ timeout: 10000 }).catch(() => {});
   await randomDelay(200, 400);
-  await box.fill("", { timeout: 5000 }).catch(() => {});
-  await box.type(text.slice(0, 8000), { delay: 20 }).catch(async () => {
-    await box.evaluate((el, t) => {
-      (el as HTMLElement).textContent = t;
-      el.dispatchEvent(new InputEvent("input", { bubbles: true, data: t }));
-    }, text.slice(0, 8000)).catch(() => {});
-  });
+  const chunkTh = text.slice(0, 8000);
+  try {
+    await box.fill("", { timeout: 5000 });
+    await box.fill(chunkTh, { timeout: 20000 });
+  } catch {
+    try {
+      await box.pressSequentially(chunkTh, { delay: 0, timeout: 180_000 });
+    } catch {
+      await box.evaluate((el, t) => {
+        const h = el as HTMLElement;
+        h.textContent = t;
+        h.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: t || null }));
+      }, chunkTh);
+    }
+  }
   await randomDelay(600, 1500);
   const send = page.getByRole("button", {
     name: /^send$|^enviar$|^enviar ahora$/i,
@@ -2390,7 +2405,7 @@ export async function commentLeadRecentPost(page: Page, profileUrl: string, comm
 
   await randomDelay(900, 1800);
 
-  const text = commentText.trim().slice(0, 3000);
+  const text = commentText.slice(0, 3000);
   // Nuevo UI puede navegar a la página del post; esperar editor
   const editorSelectors = [
     ".comments-comment-box textarea",
@@ -2412,10 +2427,20 @@ export async function commentLeadRecentPost(page: Page, profileUrl: string, comm
       await el.fill(text).catch(() => {});
     } else {
       await el.click({ timeout: 3000 }).catch(() => {});
-      await el.evaluate((node, t) => {
-        (node as HTMLElement).textContent = t;
-        node.dispatchEvent(new Event("input", { bubbles: true }));
-      }, text).catch(() => {});
+      try {
+        await el.fill("", { timeout: 4000 });
+        await el.fill(text, { timeout: 15000 });
+      } catch {
+        try {
+          await el.pressSequentially(text, { delay: 0, timeout: 120_000 });
+        } catch {
+          await el.evaluate((node, t) => {
+            const h = node as HTMLElement;
+            h.textContent = t;
+            h.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: t || null }));
+          }, text);
+        }
+      }
     }
     filled = true;
     break;
