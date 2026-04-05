@@ -1296,8 +1296,36 @@ export async function sendConnectionRequest(
     });
 
     if (masClicked) {
-      await randomDelay(1200, 2200);
-      // Buscar Conectar en CUALQUIER parte de la página (independiente de estructura de dropdown)
+      // Esperar activamente hasta 15s a que aparezca "Conectar" en cualquier lugar
+      await page.waitForFunction(() => {
+        const isVisible = (el: HTMLElement) => {
+          if (!el.offsetParent && el.tagName !== "BODY") return false;
+          const r = el.getBoundingClientRect();
+          if (r.width < 2 || r.height < 2) return false;
+          const st = window.getComputedStyle(el);
+          return st.visibility !== "hidden" && st.display !== "none" && parseFloat(st.opacity) > 0.05;
+        };
+        // Buscar en TODOS los elementos (drawer puede usar <div>, <a>, <button>, <li>, etc.)
+        for (const el of document.querySelectorAll("*")) {
+          const h = el as HTMLElement;
+          if (!isVisible(h)) continue;
+          const text = (h.textContent || "").replace(/\s+/g, " ").trim();
+          const href = (h.getAttribute("href") || "").toLowerCase();
+          if (href.includes("custom-invite")) return true;
+          if (/^conectar$/i.test(text) || /^connect$/i.test(text) ||
+              /^conectar\s+con\s+/i.test(text)) {
+            // Verificar que sea un elemento clickable (no solo un contenedor)
+            const tag = h.tagName.toLowerCase();
+            const role = (h.getAttribute("role") || "").toLowerCase();
+            if (["a", "button", "li"].includes(tag) || ["button", "menuitem", "option", "link"].includes(role)) {
+              return true;
+            }
+          }
+        }
+        return false;
+      }, { timeout: 15000 }).catch(() => {});
+
+      // Ahora hacer clic en el elemento encontrado
       clicked = await page.evaluate(() => {
         const isVisible = (el: HTMLElement) => {
           if (!el.offsetParent && el.tagName !== "BODY") return false;
@@ -1306,15 +1334,20 @@ export async function sendConnectionRequest(
           const st = window.getComputedStyle(el);
           return st.visibility !== "hidden" && st.display !== "none" && parseFloat(st.opacity) > 0.05;
         };
-        for (const el of document.querySelectorAll("a, button, [role='menuitem'], li")) {
+        for (const el of document.querySelectorAll("a, button, li, [role='menuitem'], [role='button'], [role='option'], div")) {
           const h = el as HTMLElement;
           if (!isVisible(h)) continue;
           const text = (h.textContent || "").replace(/\s+/g, " ").trim();
           const label = (h.getAttribute("aria-label") || "").toLowerCase();
           const href = (h.getAttribute("href") || "").toLowerCase();
           if (/pendiente|pending|requested|retirar|withdraw/i.test(`${text} ${label}`)) continue;
+          if (href.includes("custom-invite")) {
+            h.scrollIntoView({ block: "nearest", inline: "nearest" });
+            h.click();
+            return true;
+          }
           if (/^conectar$/i.test(text) || /^connect$/i.test(text) ||
-              /^conectar\s+con\s+/i.test(text) || href.includes("custom-invite")) {
+              /^conectar\s+con\s+/i.test(text)) {
             h.scrollIntoView({ block: "nearest", inline: "nearest" });
             h.click();
             return true;
