@@ -104,15 +104,15 @@ function profileTopActionBarWide(page: Page): Locator {
 
 /**
  * Clic en el ··· del header del perfil por posición (mitad superior del viewport), sin depender de pvs-profile-actions.
+ * Busca en todo document.body porque en el nuevo UI el top card está ANTES de <main>.
  */
 async function clickProfileHeaderOverflowByGeometry(page: Page): Promise<boolean> {
   return page.evaluate(() => {
-    const main = document.querySelector("main");
-    if (!main) return false;
     const vh = window.innerHeight;
     const maxY = vh * 0.5;
     const hits: { el: HTMLButtonElement; top: number }[] = [];
-    for (const b of main.querySelectorAll("button")) {
+    // Buscar en todo el documento — en nuevo UI el top card está antes de <main>
+    for (const b of document.querySelectorAll("button")) {
       const el = b as HTMLButtonElement;
       if (!el.querySelector("svg#overflow-web-ios-small")) continue;
       if (!el.offsetParent) continue;
@@ -239,11 +239,12 @@ async function openProfileOverflowMenu(page: Page): Promise<boolean> {
   if (await tryClickInBar(profileTopActionBarWide(page))) return true;
 
   const inMain = page.locator("main");
+  // Nuevo UI LinkedIn: botones de acción del perfil están ANTES de <main>, buscar en página completa
   const loose: Locator[] = [
-    inMain.getByRole("button", { name: /más acciones|more actions|other actions/i }),
-    inMain.getByRole("button", { name: /^Más$/i }),
-    inMain.getByRole("button", { name: /^More$/i }),
-    page.getByRole("button", { name: /más acciones|more actions/i }),
+    page.getByRole("button", { name: /más acciones|more actions|other actions/i }),
+    page.getByRole("button", { name: /^Más$/i }),
+    page.getByRole("button", { name: /^More$/i }),
+    page.locator('button:has(svg#overflow-web-ios-small)'),
     inMain.locator(
       [
         'button[aria-label*="Más opciones" i]',
@@ -258,21 +259,18 @@ async function openProfileOverflowMenu(page: Page): Promise<boolean> {
   ];
   for (const loc of loose) {
     const n = await loc.count().catch(() => 0);
-    for (let i = 0; i < Math.min(n, 2); i++) {
+    for (let i = 0; i < Math.min(n, 4); i++) {
       const el = loc.nth(i);
       if (await el.isVisible({ timeout: 700 }).catch(() => false)) {
         const inTop = await el
           .evaluate((node) => {
             const h = node as HTMLElement;
-            if (
-              h.closest(
-                "[class*='pvs-profile-actions'], .pv-top-card--list, [class*='profile-actions'], [class*='top-card'], [data-view-name*='profile-top-card']"
-              )
-            ) {
-              return true;
-            }
+            // Nuevo UI: top card está antes de <main>; verificar solo por geometría
             const r = h.getBoundingClientRect();
-            return r.top >= -12 && r.top < window.innerHeight * 0.5 && r.width > 2;
+            if (r.width < 2 || r.height < 2 || r.bottom < 0 || r.top > window.innerHeight * 0.55) return false;
+            // No clickar botones de posts/feed
+            if (h.closest("[data-urn], .feed-shared-update-v2, article")) return false;
+            return true;
           })
           .catch(() => false);
         if (!inTop) continue;
@@ -289,55 +287,59 @@ async function openProfileOverflowMenu(page: Page): Promise<boolean> {
   }
 
   const opened = await page.evaluate(() => {
-    const main = document.querySelector("main");
-    if (!main) return false;
-    const scope =
-      main.querySelector("[class*='pvs-profile-actions']") ||
-      main.querySelector(".pv-top-card--list") ||
-      main.querySelector("[class*='profile-actions']") ||
-      main.querySelector("[class*='ProfileActions']") ||
-      main.querySelector("[class*='top-card']") ||
-      main.querySelector("[data-view-name*='profile-top-card']");
-    const searchRoots: Element[] = [];
-    if (scope) searchRoots.push(scope);
-    else searchRoots.push(main);
-    const buttons = searchRoots[0]!.querySelectorAll("button");
-    for (const b of buttons) {
+    const vh = window.innerHeight;
+    const maxY = vh * 0.55;
+
+    // En el nuevo UI de LinkedIn, los botones de acción del perfil están ANTES de <main>.
+    // Por eso buscamos en todo el documento, filtrando por posición en top card (mitad superior).
+    const isInTopCard = (el: HTMLElement): boolean => {
+      const r = el.getBoundingClientRect();
+      if (r.width < 2 || r.height < 2 || r.bottom < 0 || r.top > maxY) return false;
+      // El botón no debe estar dentro de un post/feed — esos tienen data-urn o feed-shared-update-v2
+      if (el.closest("[data-urn], .feed-shared-update-v2, [class*='feed-update'], article")) return false;
+      return true;
+    };
+
+    // 1. Buscar por svg#overflow-web-ios-small en todo el documento
+    const hits: { el: HTMLButtonElement; top: number }[] = [];
+    for (const b of document.querySelectorAll("button")) {
       const el = b as HTMLButtonElement;
+      if (!el.querySelector("svg#overflow-web-ios-small")) continue;
       if (el.offsetParent === null) continue;
-      if (el.querySelector("svg#overflow-web-ios-small")) {
-        el.scrollIntoView({ block: "nearest", inline: "nearest" });
-        el.click();
-        return true;
-      }
+      if (!isInTopCard(el)) continue;
+      const r = el.getBoundingClientRect();
+      hits.push({ el, top: r.top });
     }
-    for (const b of buttons) {
+    hits.sort((a, b) => a.top - b.top);
+    if (hits.length > 0) {
+      hits[0]!.el.scrollIntoView({ block: "nearest", inline: "nearest" });
+      hits[0]!.el.click();
+      return true;
+    }
+
+    // 2. Buscar por aria-label "Más" / "More" en top card
+    for (const b of document.querySelectorAll("button")) {
       const el = b as HTMLButtonElement;
       if (el.offsetParent === null) continue;
+      if (!isInTopCard(el)) continue;
       const lb = (el.getAttribute("aria-label") || "").toLowerCase();
-      if (
-        /más opciones|more options|overflow|other actions|más acciones|ver más|see more|acciones|dropdown/i.test(lb) &&
-        !/conectar|connect|mensaje|message|enviar/i.test(lb)
-      ) {
+      if (/^más$|^more$/i.test(lb)) {
         el.scrollIntoView({ block: "nearest", inline: "nearest" });
         el.click();
         return true;
       }
     }
-    for (const b of buttons) {
+
+    // 3. Buscar artdeco-dropdown__trigger en top card
+    for (const b of document.querySelectorAll("button.artdeco-dropdown__trigger")) {
       const el = b as HTMLButtonElement;
       if (el.offsetParent === null) continue;
-      if (el.classList.contains("artdeco-dropdown__trigger")) {
-        const row = el.closest(
-          "[class*='pvs-profile-actions'], [class*='profile-actions'], .pv-top-card--list, [class*='top-card'], [data-view-name*='profile-top-card'], li"
-        );
-        if (row) {
-          el.scrollIntoView({ block: "nearest", inline: "nearest" });
-          el.click();
-          return true;
-        }
-      }
+      if (!isInTopCard(el)) continue;
+      el.scrollIntoView({ block: "nearest", inline: "nearest" });
+      el.click();
+      return true;
     }
+
     return false;
   });
   if (opened) {
@@ -889,6 +891,11 @@ async function clickConnectRobust(page: Page): Promise<boolean> {
   if (await tryInTopCard(profileTopActionBar(page))) return true;
   if (await tryInTopCard(profileTopActionBarFallback(page))) return true;
 
+  // Nuevo UI: top card (con Conectar) está ANTES de <main> — buscar en toda la página
+  if (await tryClickNthVisible(page.locator('a[href*="custom-invite"], a[href*="preload/custom-invite"]').filter({
+    hasNot: page.locator('[aria-label*="pendiente" i], [aria-label*="pending" i], [aria-label*="retirar" i], [aria-label*="withdraw" i]'),
+  }))) return true;
+
   // LinkedIn minifies class names — fallback: search the entire main without relying on class selectors.
   const mainLoc = page.locator("main");
   if (
@@ -933,19 +940,20 @@ async function clickConnectRobust(page: Page): Promise<boolean> {
       (a.getAttribute("href") || "").toLowerCase().includes("custom-invite");
 
     const scopes: Element[] = [];
-    const bar = document.querySelector("main [class*='pvs-profile-actions']");
-    const list = document.querySelector("main .pv-top-card--list");
+    const bar = document.querySelector("main [class*='pvs-profile-actions']") ||
+                document.querySelector("[class*='pvs-profile-actions']");
+    const list = document.querySelector("main .pv-top-card--list") ||
+                 document.querySelector(".pv-top-card--list");
     if (bar) scopes.push(bar);
     if (list) scopes.push(list);
     for (const op of document.querySelectorAll(
-      '.artdeco-dropdown__content--is-open, [class*="dropdown__content--is-open"]'
+      '.artdeco-dropdown__content--is-open, [class*="dropdown__content--is-open"], [role="menu"]'
     )) {
       scopes.push(op);
     }
-    // LinkedIn minifies class names — if no named containers found, search all of main.
+    // Nuevo UI: top card está antes de <main> — buscar en todo el documento
     if (scopes.length === 0) {
-      const m = document.querySelector("main");
-      if (m) scopes.push(m);
+      scopes.push(document.body);
     }
     if (scopes.length === 0) return false;
 
@@ -1321,38 +1329,57 @@ export type SendMessageToProfileOptions = {
 };
 
 async function clickProfileMessageButton(page: Page): Promise<boolean> {
-  const roots = [profileTopActionBar(page), profileTopActionBarFallback(page), profileTopActionBarWide(page)];
+  // Nuevo UI LinkedIn: "Enviar mensaje" es un <a> con svg#send-privately-medium
+  // ubicado ANTES de <main>. Buscamos en toda la página.
+
+  // 1. Enlace con svg#send-privately-medium (nuevo UI, antes de <main>)
+  const sendPrivately = page.locator('a:has(svg#send-privately-medium)').first();
+  if (await sendPrivately.isVisible({ timeout: 2000 }).catch(() => false)) {
+    await sendPrivately.scrollIntoViewIfNeeded().catch(() => {});
+    await sendPrivately.click({ timeout: 6000 }).catch(() => {});
+    return true;
+  }
+
+  // 2. Enlace a /messaging/compose/ (nuevo UI fallback)
+  const composeLink = page.locator('a[href*="/messaging/compose/"]').first();
+  if (await composeLink.isVisible({ timeout: 1500 }).catch(() => false)) {
+    await composeLink.scrollIntoViewIfNeeded().catch(() => {});
+    await composeLink.click({ timeout: 6000 }).catch(() => {});
+    return true;
+  }
+
   const patterns = [
     /^(Message|Mensaje|Enviar mensaje)$/i,
     /message|mensaje|enviar mensaje|inmail/i,
   ];
-  for (const root of roots) {
-    if (!(await root.isVisible({ timeout: 600 }).catch(() => false))) continue;
-    for (const pat of patterns) {
-      const b = root.getByRole("button", { name: pat }).first();
-      if (await b.isVisible({ timeout: 1200 }).catch(() => false)) {
-        await b.scrollIntoViewIfNeeded().catch(() => {});
-        await b.click({ timeout: 6000 }).catch(() => {});
-        return true;
-      }
-      const l = root.getByRole("link", { name: pat }).first();
-      if (await l.isVisible({ timeout: 800 }).catch(() => false)) {
-        await l.click({ timeout: 6000 }).catch(() => {});
-        return true;
-      }
-    }
-  }
 
-  const inMain = page.locator("main");
+  // 3. Buscar en toda la página (no solo main) — nuevo UI pone botones antes de <main>
   for (const pat of patterns) {
-    const b = inMain.getByRole("button", { name: pat }).first();
-    if (await b.isVisible({ timeout: 1500 }).catch(() => false)) {
-      await b.scrollIntoViewIfNeeded().catch(() => {});
-      await b.click({ timeout: 6000 }).catch(() => {});
-      return true;
+    for (const loc of [
+      page.getByRole("button", { name: pat }),
+      page.getByRole("link", { name: pat }),
+    ]) {
+      const n = await loc.count().catch(() => 0);
+      for (let i = 0; i < Math.min(n, 6); i++) {
+        const el = loc.nth(i);
+        if (!(await el.isVisible({ timeout: 800 }).catch(() => false))) continue;
+        // Solo en top card (top 60% del viewport, no en posts)
+        const inTopCard = await el.evaluate((node) => {
+          const h = node as HTMLElement;
+          const r = h.getBoundingClientRect();
+          if (r.top > window.innerHeight * 0.6 || r.width < 2) return false;
+          if (h.closest("[data-urn], .feed-shared-update-v2, article")) return false;
+          return true;
+        }).catch(() => false);
+        if (!inTopCard) continue;
+        await el.scrollIntoViewIfNeeded().catch(() => {});
+        await el.click({ timeout: 6000 }).catch(() => {});
+        return true;
+      }
     }
   }
 
+  // 4. Overflow menu (por si "Mensaje" está en el desplegable "Más")
   const opened = await openProfileOverflowMenu(page);
   if (opened) {
     const mi = page.getByRole("menuitem", { name: /message|mensaje|enviar mensaje|inmail/i }).first();
@@ -1843,13 +1870,20 @@ export async function commentLeadRecentPost(page: Page, profileUrl: string, comm
     const root = document.querySelector("main");
     if (!root) return false;
     const card = root.querySelector(".feed-shared-update-v2");
-    if (!card) return false;
-    for (const b of card.querySelectorAll("button")) {
-      const el = b as HTMLButtonElement;
-      if (el.offsetParent === null) continue;
-      const label = (el.getAttribute("aria-label") || "").toLowerCase();
+    const searchRoot = card ?? root;
+
+    // Nuevo UI: "Comentar" es un <a> sin aria-label, solo texto visible
+    for (const el of searchRoot.querySelectorAll("a, button")) {
+      const h = el as HTMLElement;
+      if (h.offsetParent === null) continue;
+      const label = (h.getAttribute("aria-label") || "").toLowerCase();
+      const text = (h.textContent || "").replace(/\s+/g, " ").trim();
       if (/comment|comentar|open comments|ver comentarios|add a comment/i.test(label)) {
-        el.click();
+        h.click();
+        return true;
+      }
+      if (/^comentar$/i.test(text) || /^comment$/i.test(text)) {
+        h.click();
         return true;
       }
     }
@@ -1857,8 +1891,17 @@ export async function commentLeadRecentPost(page: Page, profileUrl: string, comm
   });
 
   if (!opened) {
-    const c = inMain.locator(".feed-shared-update-v2").first().getByRole("button", { name: /Comment|Comentar/i }).first();
-    if (await c.isVisible({ timeout: 7000 }).catch(() => false)) {
+    // Buscar <a> o button con texto "Comentar" en la primera tarjeta o en main
+    const comentarLink = inMain.locator("a, button").filter({ hasText: /^Comentar$/i }).first();
+    if (await comentarLink.isVisible({ timeout: 7000 }).catch(() => false)) {
+      await comentarLink.click({ timeout: 5000 }).catch(() => {});
+      opened = true;
+    }
+  }
+
+  if (!opened) {
+    const c = inMain.getByRole("button", { name: /Comment|Comentar/i }).first();
+    if (await c.isVisible({ timeout: 4000 }).catch(() => false)) {
       await c.click({ timeout: 5000 }).catch(() => {});
       opened = true;
     }
@@ -1873,22 +1916,37 @@ export async function commentLeadRecentPost(page: Page, profileUrl: string, comm
   await randomDelay(900, 1800);
 
   const text = commentText.trim().slice(0, 3000);
-  const editor = page
-    .locator(".comments-comment-box textarea, .comments-comment-texteditor textarea, .comments-comment-box__form textarea")
-    .first();
-  const rich = page
-    .locator(".comments-comment-box [contenteditable='true'], .comments-comment-texteditor [contenteditable='true']")
-    .first();
+  // Nuevo UI puede navegar a la página del post; esperar editor
+  const editorSelectors = [
+    ".comments-comment-box textarea",
+    ".comments-comment-texteditor textarea",
+    ".comments-comment-box__form textarea",
+    ".comments-comment-box [contenteditable='true']",
+    ".comments-comment-texteditor [contenteditable='true']",
+    "div[contenteditable='true'][role='textbox']",
+    "div[contenteditable='true']",
+    "textarea",
+  ];
 
-  if (await editor.isVisible({ timeout: 9000 }).catch(() => false)) {
-    await editor.fill(text);
-  } else if (await rich.isVisible({ timeout: 6000 }).catch(() => false)) {
-    await rich.click({ timeout: 4000 }).catch(() => {});
-    await rich.evaluate((el, t) => {
-      el.textContent = t;
-      el.dispatchEvent(new Event("input", { bubbles: true }));
-    }, text);
-  } else {
+  let filled = false;
+  for (const sel of editorSelectors) {
+    const el = page.locator(sel).first();
+    if (!(await el.isVisible({ timeout: sel.includes("comments") ? 9000 : 3000 }).catch(() => false))) continue;
+    const tag = (await el.evaluate((n) => n.tagName).catch(() => "")) || "";
+    if (tag.toLowerCase() === "textarea") {
+      await el.fill(text).catch(() => {});
+    } else {
+      await el.click({ timeout: 3000 }).catch(() => {});
+      await el.evaluate((node, t) => {
+        (node as HTMLElement).textContent = t;
+        node.dispatchEvent(new Event("input", { bubbles: true }));
+      }, text).catch(() => {});
+    }
+    filled = true;
+    break;
+  }
+
+  if (!filled) {
     const g = await guardSoftban(page);
     if (g) return g;
     return { ok: false, error: "comment_editor_missing" };
@@ -1896,7 +1954,7 @@ export async function commentLeadRecentPost(page: Page, profileUrl: string, comm
 
   await randomDelay(400, 900);
 
-  const postBtn = page.getByRole("button", { name: /^Post$|^Publicar$|^Comentar$/i }).first();
+  const postBtn = page.getByRole("button", { name: /^Post$|^Publicar$|^Comentar$|^Comment$/i }).first();
   if (await postBtn.isVisible({ timeout: 5000 }).catch(() => false)) {
     await postBtn.click({ timeout: 6000 }).catch(() => {});
   } else {
