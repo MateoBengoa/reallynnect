@@ -220,14 +220,14 @@ export async function injectLiAt(page: Page, cookieValue: string): Promise<void>
   ]);
 
   // Navigate directly to feed (authenticated).
-  // Reintentamos hasta 4 veces con backoff; si LinkedIn va lento pero la cookie está
-  // inyectada la sesión sigue siendo válida aunque el timeout se dispare.
-  const MAX_NAV_ATTEMPTS = 4;
-  const NAV_RETRY_DELAYS = [5000, 10000, 15000]; // ms entre reintentos
+  // Timeout corto por intento (30s) con hasta 3 reintentos; si LinkedIn va lento pero
+  // la URL ya es linkedin.com la cookie está inyectada y la sesión es válida.
+  const MAX_NAV_ATTEMPTS = 3;
+  const NAV_RETRY_DELAYS = [6000, 12000]; // ms entre reintentos
   let lastNavErr: unknown;
   for (let attempt = 0; attempt < MAX_NAV_ATTEMPTS; attempt++) {
     try {
-      await page.goto("https://www.linkedin.com/feed/", { waitUntil: "domcontentloaded", timeout: 90000 });
+      await page.goto("https://www.linkedin.com/feed/", { waitUntil: "domcontentloaded", timeout: 30000 });
       lastNavErr = null;
       break;
     } catch (e) {
@@ -241,14 +241,15 @@ export async function injectLiAt(page: Page, cookieValue: string): Promise<void>
       const msg = e instanceof Error ? e.message : String(e);
       const isNetErr = /ERR_TIMED_OUT|ERR_NAME_NOT_RESOLVED|ERR_CONNECTION|ERR_NETWORK|net::/i.test(msg);
       if (!isNetErr || attempt >= MAX_NAV_ATTEMPTS - 1) break;
-      const waitMs = NAV_RETRY_DELAYS[attempt] ?? 15000;
+      const waitMs = NAV_RETRY_DELAYS[attempt] ?? 12000;
       await new Promise((r) => setTimeout(r, waitMs));
     }
   }
   if (lastNavErr !== null) {
     const url = page.url();
     const reason = lastNavErr instanceof Error ? lastNavErr.message : String(lastNavErr);
-    throw new Error(`injectLiAt: navegación fallida — URL actual: ${url} — ${reason}`);
+    // Prefijo navigation_timeout para que taskRunner no marque el proxy como degradado
+    throw new Error(`navigation_timeout: injectLiAt falló — ${url} — ${reason}`);
   }
 }
 

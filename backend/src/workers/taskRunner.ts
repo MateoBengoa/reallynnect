@@ -3531,8 +3531,11 @@ export async function runOneTask(sb: SupabaseClient, redis: RedisClient, taskId:
     await fail(`unknown_action:${action}`);
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
-    if (msg.includes("timeout") || msg.includes("net::") || msg.includes("Proxy")) {
-      if (account.proxy_id) await markProxyDegraded(sb, account.proxy_id as string);
+    // Solo marcar el proxy como degradado en errores claramente del proxy (túnel/conexión al proxy).
+    // ERR_TIMED_OUT en LinkedIn es timeout de red general — no indica proxy roto.
+    const isProxySpecificErr = /ERR_PROXY|PROXY_CONNECTION|ERR_TUNNEL|proxy.*failed|failed.*proxy/i.test(msg);
+    if (isProxySpecificErr && account.proxy_id) {
+      await markProxyDegraded(sb, account.proxy_id as string);
     }
     if (traceCtl) {
       await traceCtl.stopSaveFailure().catch(() => {});
