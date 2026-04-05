@@ -717,8 +717,45 @@ async function tryClickNthVisible(loc: Locator, max?: number): Promise<boolean> 
 async function clickConnectInOpenDropdown(page: Page): Promise<boolean> {
   await randomDelay(650, 1300);
 
-  // Nuevo UI: ProfilePostConnectDrawer — un <div> con aria-label "Invita a X a conectar"
-  // y svg#connect-small. No está dentro de ningún panel artdeco ni role="menu".
+  // Nuevo UI: ProfilePostConnectDrawer — esperar activamente hasta 15s a que aparezca
+  // el <div aria-label="Invita a X a conectar"> con svg#connect-small.
+  await page.waitForFunction(() => {
+    const isVisible = (el: HTMLElement) => {
+      if (!el.offsetParent && el.tagName !== "BODY") return false;
+      const r = el.getBoundingClientRect();
+      if (r.width < 3 || r.height < 3) return false;
+      const st = window.getComputedStyle(el);
+      return st.visibility !== "hidden" && st.display !== "none" && parseFloat(st.opacity ?? "1") > 0.05;
+    };
+    for (const el of document.querySelectorAll("div[aria-label], svg#connect-small")) {
+      const h = el as HTMLElement;
+      if (!isVisible(h)) continue;
+      if (el.tagName.toLowerCase() === "svg") {
+        const row = h.closest("div[aria-label], [role='menuitem'], li") as HTMLElement | null;
+        if (row && isVisible(row)) {
+          const al = (row.getAttribute("aria-label") || "").toLowerCase();
+          if (/conectar|connect/i.test(al) && !/pendiente|pending|requested/i.test(al)) return true;
+        }
+        continue;
+      }
+      const al = (h.getAttribute("aria-label") || "").toLowerCase();
+      if (/conectar|connect/i.test(al) && !/pendiente|pending|requested/i.test(al) && h.querySelector("svg#connect-small")) return true;
+    }
+    // También aceptar artdeco/role=menu con "Conectar" (UI viejo)
+    for (const panel of document.querySelectorAll('.artdeco-dropdown__content--is-open, [role="menu"]')) {
+      const p = panel as HTMLElement;
+      const pr = p.getBoundingClientRect();
+      if (pr.height < 12) continue;
+      for (const el of p.querySelectorAll('[role="menuitem"], li')) {
+        const t = (el.textContent || "").replace(/\s+/g, " ").trim();
+        if (/^conectar$/i.test(t) || /^connect$/i.test(t)) return true;
+        if ((el as HTMLElement).querySelector("svg#connect-small")) return true;
+      }
+    }
+    return false;
+  }, { timeout: 15000 }).catch(() => {});
+
+  // Ahora hacer clic
   const drawerClicked = await page.evaluate(() => {
     const isVisible = (el: HTMLElement) => {
       if (!el.offsetParent && el.tagName !== "BODY") return false;
