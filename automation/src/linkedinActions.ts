@@ -1391,6 +1391,14 @@ async function clickProfileMessageButton(page: Page): Promise<boolean> {
   return false;
 }
 
+/** Selectores del editor de redacción de mensajes (overlay o página completa). */
+const MSG_EDITOR_SEL =
+  ".msg-form__contenteditable, " +
+  "div[role='textbox'][contenteditable='true'], " +
+  "div[contenteditable='true'][aria-label*='mensaje' i], " +
+  "div[contenteditable='true'][aria-label*='message' i], " +
+  "div[contenteditable='true'][aria-multiline='true']";
+
 async function openMessagingComposeFromProfile(
   page: Page,
   profileUrl: string,
@@ -1406,12 +1414,44 @@ async function openMessagingComposeFromProfile(
   await randomDelay(500, 1200);
   const g = await guardSoftban(page);
   if (g) return g;
+
+  // Obtener el href del botón antes de clicarlo (por si hace falta navegar directamente)
+  const composeHref = await page.locator('a[href*="/messaging/compose/"]').first()
+    .getAttribute("href").catch(() => null);
+
   if (!(await clickProfileMessageButton(page))) {
     const g2 = await guardSoftban(page);
     if (g2) return g2;
     return { ok: false, error: "message_button_missing" };
   }
-  await randomDelay(2000, 5000);
+
+  // Esperar a que aparezca el editor (overlay o navegación a página de mensajes)
+  const editorFound = await page.locator(MSG_EDITOR_SEL).first()
+    .waitFor({ state: "visible", timeout: 35000 })
+    .then(() => true)
+    .catch(() => false);
+
+  if (!editorFound) {
+    // Fallback: navegar directamente a la URL de compose
+    if (composeHref) {
+      await page.goto(`https://www.linkedin.com${composeHref}`, {
+        waitUntil: "domcontentloaded",
+        timeout: 30000,
+      }).catch(() => {});
+      await page.locator(MSG_EDITOR_SEL).first()
+        .waitFor({ state: "visible", timeout: 20000 })
+        .catch(() => {});
+    } else {
+      // Sin href: intentar navegar a mensajes en general
+      await page.goto("https://www.linkedin.com/messaging/", {
+        waitUntil: "domcontentloaded",
+        timeout: 30000,
+      }).catch(() => {});
+    }
+  }
+
+  const g2 = await guardSoftban(page);
+  if (g2) return g2;
   return null;
 }
 
@@ -1424,16 +1464,39 @@ export async function sendMessageToProfile(
   const openErr = await openMessagingComposeFromProfile(page, profileUrl, options?.skipProfileVisit);
   if (openErr) return openErr;
 
-  const box = page.locator(".msg-form__contenteditable, div[role='textbox']").first();
-  await box.waitFor({ state: "visible", timeout: 20000 }).catch(() => {});
-  await box.click({ timeout: 10000 }).catch(() => {});
-  await box.fill(text.slice(0, 8000));
+  const box = page.locator(MSG_EDITOR_SEL).first();
+  const boxVisible = await box.isVisible({ timeout: 10000 }).catch(() => false);
+  if (!boxVisible) {
+    const g = await guardSoftban(page);
+    if (g) return g;
+    return { ok: false, error: "message_editor_missing" };
+  }
+
+  await box.scrollIntoViewIfNeeded().catch(() => {});
+  await box.click({ timeout: 8000 }).catch(() => {});
+  await randomDelay(300, 600);
+
+  const tag = (await box.evaluate((n) => n.tagName).catch(() => "")) || "";
+  if (tag.toLowerCase() === "textarea" || tag.toLowerCase() === "input") {
+    await box.fill(text.slice(0, 8000), { timeout: 15000 });
+  } else {
+    // contenteditable div — usar type() para activar los event handlers de React/Ember
+    await box.fill("", { timeout: 10000 }).catch(() => {});
+    await box.type(text.slice(0, 8000), { delay: 20 }).catch(async () => {
+      // fallback: inyectar via evaluate
+      await box.evaluate((el, t) => {
+        (el as HTMLElement).textContent = t;
+        el.dispatchEvent(new InputEvent("input", { bubbles: true, data: t }));
+      }, text.slice(0, 8000)).catch(() => {});
+    });
+  }
+
   await randomDelay(800, 2000);
   const send = page.getByRole("button", {
     name: /^send$|^enviar$|^enviar ahora$/i,
   }).first();
-  if (await send.isVisible({ timeout: 6000 }).catch(() => false)) {
-    await send.click({ timeout: 8000 }).catch(() => {});
+  if (await send.isVisible({ timeout: 8000 }).catch(() => false)) {
+    await send.click({ timeout: 10000 }).catch(() => {});
   } else {
     await page.keyboard.press("Enter").catch(() => {});
   }
@@ -1490,10 +1553,18 @@ export async function sendMessageInMessagingThread(page: Page, threadIdOrUrl: st
   const g = await guardSoftban(page);
   if (g) return g;
 
-  const box = page.locator(".msg-form__contenteditable, div[role='textbox']").first();
+  const box = page.locator(MSG_EDITOR_SEL).first();
   await box.waitFor({ state: "visible", timeout: 25000 }).catch(() => {});
+  await box.scrollIntoViewIfNeeded().catch(() => {});
   await box.click({ timeout: 10000 }).catch(() => {});
-  await box.fill(text.slice(0, 8000));
+  await randomDelay(200, 400);
+  await box.fill("", { timeout: 5000 }).catch(() => {});
+  await box.type(text.slice(0, 8000), { delay: 20 }).catch(async () => {
+    await box.evaluate((el, t) => {
+      (el as HTMLElement).textContent = t;
+      el.dispatchEvent(new InputEvent("input", { bubbles: true, data: t }));
+    }, text.slice(0, 8000)).catch(() => {});
+  });
   await randomDelay(600, 1500);
   const send = page.getByRole("button", {
     name: /^send$|^enviar$|^enviar ahora$/i,
