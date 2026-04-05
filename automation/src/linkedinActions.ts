@@ -742,7 +742,9 @@ async function clickConnectInOpenDropdown(page: Page): Promise<boolean> {
   `;
   void isVisibleFn; // solo para documentación
 
-  // Esperar activamente hasta 15s a que aparezca un elemento "Conectar" en CUALQUIER panel
+  // Esperar activamente hasta 15s a que aparezca el menú abierto con "Conectar".
+  // NO usar svg#connect-small como señal — existe en sugerencias de conexión antes de abrir el menú.
+  // Buscar específicamente: <a role="menuitem" href*="custom-invite"> O [role="menu"] visible con texto Conectar.
   await page.waitForFunction(() => {
     const isVis = (el: HTMLElement) => {
       if (!el.offsetParent && el.tagName !== "BODY") return false;
@@ -753,36 +755,41 @@ async function clickConnectInOpenDropdown(page: Page): Promise<boolean> {
     };
     const reject = (s: string) => /pendiente|pending|requested|withdraw|retirar/i.test(s);
 
-    // 1. svg#connect-small visible en cualquier lugar (indica opción Conectar)
-    for (const svg of document.querySelectorAll("svg#connect-small")) {
-      const h = svg as HTMLElement;
-      if (!h.offsetParent) continue;
+    // 1. <a role="menuitem" href*="custom-invite"> — el elemento EXACTO del HTML del nuevo UI
+    for (const a of document.querySelectorAll('a[role="menuitem"][href*="custom-invite"]')) {
+      const h = a as HTMLElement;
+      if (!isVis(h)) continue;
+      const al = (h.getAttribute("aria-label") || h.querySelector("[aria-label]")?.getAttribute("aria-label") || "").toLowerCase();
+      if (!reject(al)) return true;
+    }
+    // 2. [role="menu"] visible que contenga "Conectar" — cubre cualquier variante de dropdown
+    for (const menu of document.querySelectorAll('[role="menu"]')) {
+      const m = menu as HTMLElement;
+      if (!isVis(m)) continue;
+      const r = m.getBoundingClientRect();
+      if (r.height < 30) continue;
+      for (const item of m.querySelectorAll('[role="menuitem"], a, div, li')) {
+        const h = item as HTMLElement;
+        if (!isVis(h)) continue;
+        const text = (h.textContent || "").replace(/\s+/g, " ").trim();
+        if (reject(text)) continue;
+        if (/^conectar$/i.test(text) || /^connect$/i.test(text)) return true;
+      }
+    }
+    // 3. [popover] abierto con "Conectar" (nuevo UI popover="manual")
+    for (const pop of document.querySelectorAll("[popover]")) {
+      const h = pop as HTMLElement;
+      const st = window.getComputedStyle(h);
+      if (st.display === "none") continue;
       const r = h.getBoundingClientRect();
-      if (r.width < 1 || r.height < 1) continue;
-      return true;
-    }
-    // 2. div[aria-label*=conectar] (ProfilePostConnectDrawer)
-    for (const el of document.querySelectorAll("div[aria-label]")) {
-      const h = el as HTMLElement;
-      if (!isVis(h)) continue;
-      const al = (h.getAttribute("aria-label") || "").toLowerCase();
-      if (!/conectar|connect/i.test(al) || reject(al)) continue;
-      return true;
-    }
-    // 3. Texto "Conectar" en cualquier item de dropdown (artdeco-dropdown__item, pvs-overflow, menuitem)
-    for (const el of document.querySelectorAll(
-      '[class*="artdeco-dropdown__item"], [class*="pvs-overflow"], [role="menuitem"], .artdeco-dropdown__content--is-open li'
-    )) {
-      const h = el as HTMLElement;
-      if (!isVis(h)) continue;
-      const t = (h.textContent || "").replace(/\s+/g, " ").trim();
-      if (reject(t)) continue;
-      if (/^conectar$/i.test(t) || /^connect$/i.test(t)) return true;
+      if (r.height < 30) continue;
+      const text = (h.textContent || "").replace(/\s+/g, " ").trim();
+      if (/conectar|connect/i.test(text) && !reject(text)) return true;
     }
     return false;
   }, { timeout: 15000 }).catch(() => {});
 
-  // Hacer clic en el elemento Conectar encontrado — búsqueda amplia sin depender del contenedor
+  // Hacer clic — priorizar el elemento exacto del HTML real
   const drawerClicked = await page.evaluate(() => {
     const isVis = (el: HTMLElement) => {
       if (!el.offsetParent && el.tagName !== "BODY") return false;
@@ -797,41 +804,37 @@ async function clickConnectInOpenDropdown(page: Page): Promise<boolean> {
       el.click();
     };
 
-    // 1. svg#connect-small → subir al contenedor clickable
-    for (const svg of document.querySelectorAll("svg#connect-small")) {
-      const row = (svg as HTMLElement).closest(
-        "div[aria-label], [role='menuitem'], [class*='artdeco-dropdown__item'], [class*='pvs-overflow'], li, a"
-      ) as HTMLElement | null;
-      if (!row || !isVis(row)) continue;
-      const al = (row.getAttribute("aria-label") || "").toLowerCase();
-      const text = (row.textContent || "").replace(/\s+/g, " ").trim();
-      if (reject(`${al} ${text}`)) continue;
-      if (/conectar|connect/i.test(al) || /^conectar$/i.test(text) || /^connect$/i.test(text)) {
-        doClick(row);
-        return true;
-      }
-    }
-    // 2. div[aria-label*=conectar] (drawer nuevo UI)
-    for (const el of document.querySelectorAll("div[aria-label]")) {
-      const h = el as HTMLElement;
+    // 1. <a role="menuitem" href*="custom-invite"> — MÁXIMA PRIORIDAD (HTML exacto)
+    for (const a of document.querySelectorAll('a[role="menuitem"][href*="custom-invite"]')) {
+      const h = a as HTMLElement;
       if (!isVis(h)) continue;
-      const al = (h.getAttribute("aria-label") || "").toLowerCase();
-      if (!/conectar|connect/i.test(al) || reject(al)) continue;
+      const innerAl = (h.querySelector("[aria-label]")?.getAttribute("aria-label") || "").toLowerCase();
+      if (reject(innerAl)) continue;
       doClick(h);
       return true;
     }
-    // 3. artdeco-dropdown__item / pvs-overflow / menuitem con texto "Conectar"
-    for (const el of document.querySelectorAll(
-      '[class*="artdeco-dropdown__item"], [class*="pvs-overflow"], [role="menuitem"]'
-    )) {
-      const h = el as HTMLElement;
-      if (!isVis(h)) continue;
-      const text = (h.textContent || "").replace(/\s+/g, " ").trim();
-      if (reject(text)) continue;
-      if (/^conectar$/i.test(text) || /^connect$/i.test(text)) {
-        doClick(h);
-        return true;
+    // 2. [role="menu"] → items con "Conectar"
+    for (const menu of document.querySelectorAll('[role="menu"]')) {
+      const m = menu as HTMLElement;
+      if (!isVis(m)) continue;
+      for (const item of m.querySelectorAll('[role="menuitem"], a')) {
+        const h = item as HTMLElement;
+        if (!isVis(h)) continue;
+        const text = (h.textContent || "").replace(/\s+/g, " ").trim();
+        const al = (h.getAttribute("aria-label") || h.querySelector("[aria-label]")?.getAttribute("aria-label") || "").toLowerCase();
+        if (reject(`${text} ${al}`)) continue;
+        if (/^conectar$/i.test(text) || /^connect$/i.test(text) || /conectar|connect/i.test(al)) {
+          doClick(h);
+          return true;
+        }
       }
+    }
+    // 3. [popover] abierto → href*=custom-invite o texto Conectar
+    for (const pop of document.querySelectorAll("[popover]")) {
+      const h = pop as HTMLElement;
+      if (window.getComputedStyle(h).display === "none") continue;
+      const aInvite = h.querySelector('a[href*="custom-invite"]') as HTMLElement | null;
+      if (aInvite && isVis(aInvite)) { doClick(aInvite); return true; }
     }
     return false;
   });
@@ -881,7 +884,7 @@ async function clickConnectInOpenDropdown(page: Page): Promise<boolean> {
     .catch(() => {});
 
   const openPanel = page.locator(
-    '[class*="pvs-overflow-actions-dropdown"], .artdeco-dropdown__content--is-open, [class*="dropdown__content--is-open"], .artdeco-dropdown__content-inner, [class*="artdeco-dropdown__content-inner"], [role="menu"]'
+    '[popover], [role="menu"], [class*="pvs-overflow-actions-dropdown"], .artdeco-dropdown__content--is-open, [class*="dropdown__content--is-open"], .artdeco-dropdown__content-inner, [class*="artdeco-dropdown__content-inner"]'
   );
 
   const scopedMenuItems = (inner: Locator): Locator[] => [
@@ -1060,6 +1063,10 @@ async function clickConnectRobust(page: Page): Promise<boolean> {
   if (await tryInTopCard(profileTopActionBarFallback(page))) return true;
 
   // Nuevo UI: top card (con Conectar) está ANTES de <main> — buscar en toda la página
+  // Prioridad máxima: <a role="menuitem" href*=custom-invite> (dentro del popover del menú Más)
+  if (await tryClickNthVisible(page.locator('a[role="menuitem"][href*="custom-invite"]').filter({
+    hasNot: page.locator('[aria-label*="pendiente" i], [aria-label*="pending" i], [aria-label*="retirar" i], [aria-label*="withdraw" i]'),
+  }))) return true;
   if (await tryClickNthVisible(page.locator('a[href*="custom-invite"], a[href*="preload/custom-invite"]').filter({
     hasNot: page.locator('[aria-label*="pendiente" i], [aria-label*="pending" i], [aria-label*="retirar" i], [aria-label*="withdraw" i]'),
   }))) return true;
