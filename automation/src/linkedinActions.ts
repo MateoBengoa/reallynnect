@@ -5,6 +5,17 @@ import { normalizeLinkedInProfileUrl } from "./linkedinUrls.js";
 
 export type ActionResult = { ok: boolean; softban?: boolean; error?: string };
 
+/** Rutas típicas del enlace «Conectar» / invitación (LinkedIn cambia URLs entre versiones). */
+const A_INVITE_FLOW =
+  'a[href*="custom-invite"], a[href*="preload/custom-invite"], a[href*="invite-connect"], a[href*="mynetwork/invite"]';
+
+const A_MENUITEM_INVITE = [
+  'a[role="menuitem"][href*="custom-invite"]',
+  'a[role="menuitem"][href*="preload/custom-invite"]',
+  'a[role="menuitem"][href*="invite-connect"]',
+  'a[role="menuitem"][href*="mynetwork/invite"]',
+].join(", ");
+
 async function guardSoftban(page: Page): Promise<ActionResult | null> {
   const s = await detectSoftban(page);
   if (s === "suspected") return { ok: false, softban: true };
@@ -122,6 +133,26 @@ function profileTopActionBarWide(page: Page): Locator {
 }
 
 /**
+ * Barra de acciones del perfil en cualquier zona del DOM (LinkedIn a veces renderiza el top card
+ * fuera de `<main>` o con clases distintas a pvs-profile-actions).
+ */
+function profileActionStripGlobal(page: Page): Locator {
+  return page
+    .locator(
+      [
+        "[class*='pvs-profile-actions']",
+        "[class*='TopcardList']",
+        "[class*='top-card--list']",
+        "[data-view-name='profile-top-card']",
+        "[data-view-name*='profile-top-card']",
+        "[data-view-name*='profile-primary-action']",
+        "div[class*='IdentityModule']",
+      ].join(", ")
+    )
+    .first();
+}
+
+/**
  * Clic en el ··· del header del perfil por posición (mitad superior del viewport), sin depender de pvs-profile-actions.
  * Busca en todo document.body porque en el nuevo UI el top card está ANTES de <main>.
  */
@@ -138,10 +169,20 @@ async function clickProfileHeaderOverflowByGeometry(page: Page): Promise<boolean
       if (r.width < 2 || r.height < 2 || r.bottom < 0 || r.top > maxY) continue;
       if (el.closest("[data-urn], .feed-shared-update-v2, article")) continue;
       // Nuevo UI: detectar por svg#overflow-web-ios-small O por texto "Más"/"More"
-      const hasSvg = !!el.querySelector("svg#overflow-web-ios-small");
+      const svg = el.querySelector("svg");
+      const useHref = (
+        svg?.querySelector("use")?.getAttribute("href") ||
+        svg?.querySelector("use")?.getAttribute("xlink:href") ||
+        ""
+      ).toLowerCase();
+      const svgId = (svg?.id || "").toLowerCase();
+      const hasOverflowSvg =
+        !!el.querySelector("svg#overflow-web-ios-small") ||
+        svgId.includes("overflow") ||
+        useHref.includes("overflow");
       const text = (el.textContent || "").replace(/\s+/g, " ").trim();
       const lb = (el.getAttribute("aria-label") || "").trim();
-      if (!hasSvg && !/^más$/i.test(text) && !/^more$/i.test(text) && !/^más$/i.test(lb) && !/^more$/i.test(lb)) continue;
+      if (!hasOverflowSvg && !/^más$/i.test(text) && !/^more$/i.test(text) && !/^más$/i.test(lb) && !/^more$/i.test(lb)) continue;
       hits.push({ el, top: r.top });
     }
     hits.sort((a, b) => a.top - b.top);
@@ -156,7 +197,7 @@ async function clickProfileHeaderOverflowByGeometry(page: Page): Promise<boolean
 /** Navegación errónea típica al pulsar un enlace de actividad en lugar de Conectar del top card. */
 function navigatedToFeedOrActivity(url: string): boolean {
   const u = url.toLowerCase();
-  if (/custom-invite|invite-send/i.test(u)) return false;
+  if (/custom-invite|invite-connect|invite-send/i.test(u)) return false;
   return /\/feed\/update\//i.test(u) || /linkedin\.com\/feed\/?(\?|#|$)/i.test(u);
 }
 
@@ -227,6 +268,7 @@ async function openProfileOverflowMenu(page: Page): Promise<boolean> {
 
     const candidates: Locator[] = [
       bar.locator("button:has(svg#overflow-web-ios-small)"),
+      bar.locator('button:has(svg[id*="overflow"])'),
       bar.getByRole("button", { name: /más acciones|more actions|other actions/i }),
       bar.getByRole("button", { name: /^Más$/i }),
       bar.getByRole("button", { name: /^More$/i }),
@@ -279,6 +321,7 @@ async function openProfileOverflowMenu(page: Page): Promise<boolean> {
     page.getByRole("button", { name: /^Más$/i }),
     page.getByRole("button", { name: /^More$/i }),
     page.locator('button:has(svg#overflow-web-ios-small)'),
+    page.locator('button:has(svg[id*="overflow"])'),
     inMain.locator(
       [
         'button[aria-label*="Más opciones" i]',
@@ -334,11 +377,22 @@ async function openProfileOverflowMenu(page: Page): Promise<boolean> {
       return true;
     };
 
-    // 1. Buscar por svg#overflow-web-ios-small en todo el documento (UI viejo)
+    // 1. Buscar icono «···» / overflow (id fijo o variantes en SVG/use)
     const hits: { el: HTMLButtonElement; top: number }[] = [];
     for (const b of document.querySelectorAll("button")) {
       const el = b as HTMLButtonElement;
-      if (!el.querySelector("svg#overflow-web-ios-small")) continue;
+      const svg = el.querySelector("svg");
+      const useHref = (
+        svg?.querySelector("use")?.getAttribute("href") ||
+        svg?.querySelector("use")?.getAttribute("xlink:href") ||
+        ""
+      ).toLowerCase();
+      const svgId = (svg?.id || "").toLowerCase();
+      const hasOverflowSvg =
+        !!el.querySelector("svg#overflow-web-ios-small") ||
+        svgId.includes("overflow") ||
+        useHref.includes("overflow");
+      if (!hasOverflowSvg) continue;
       if (el.offsetParent === null) continue;
       if (!isInTopCard(el)) continue;
       const r = el.getBoundingClientRect();
@@ -755,8 +809,10 @@ async function clickConnectInOpenDropdown(page: Page): Promise<boolean> {
     };
     const reject = (s: string) => /pendiente|pending|requested|withdraw|retirar/i.test(s);
 
-    // 1. <a role="menuitem" href*="custom-invite"> — el elemento EXACTO del HTML del nuevo UI
-    for (const a of document.querySelectorAll('a[role="menuitem"][href*="custom-invite"]')) {
+    // 1. <a role="menuitem"> con href de invitación (LinkedIn varía la ruta)
+    for (const a of document.querySelectorAll(
+      'a[role="menuitem"][href*="custom-invite"], a[role="menuitem"][href*="preload/custom-invite"], a[role="menuitem"][href*="invite-connect"], a[role="menuitem"][href*="mynetwork/invite"]'
+    )) {
       const h = a as HTMLElement;
       if (!isVis(h)) continue;
       const al = (h.getAttribute("aria-label") || h.querySelector("[aria-label]")?.getAttribute("aria-label") || "").toLowerCase();
@@ -804,8 +860,10 @@ async function clickConnectInOpenDropdown(page: Page): Promise<boolean> {
       el.click();
     };
 
-    // 1. <a role="menuitem" href*="custom-invite"> — MÁXIMA PRIORIDAD (HTML exacto)
-    for (const a of document.querySelectorAll('a[role="menuitem"][href*="custom-invite"]')) {
+    // 1. <a role="menuitem"> con href de invitación
+    for (const a of document.querySelectorAll(
+      'a[role="menuitem"][href*="custom-invite"], a[role="menuitem"][href*="preload/custom-invite"], a[role="menuitem"][href*="invite-connect"], a[role="menuitem"][href*="mynetwork/invite"]'
+    )) {
       const h = a as HTMLElement;
       if (!isVis(h)) continue;
       const innerAl = (h.querySelector("[aria-label]")?.getAttribute("aria-label") || "").toLowerCase();
@@ -829,12 +887,19 @@ async function clickConnectInOpenDropdown(page: Page): Promise<boolean> {
         }
       }
     }
-    // 3. [popover] abierto → href*=custom-invite o texto Conectar
+    // 3. [popover] abierto → enlace de invitación o texto Conectar
     for (const pop of document.querySelectorAll("[popover]")) {
       const h = pop as HTMLElement;
       if (window.getComputedStyle(h).display === "none") continue;
-      const aInvite = h.querySelector('a[href*="custom-invite"]') as HTMLElement | null;
-      if (aInvite && isVis(aInvite)) { doClick(aInvite); return true; }
+      for (const aInvite of h.querySelectorAll(
+        'a[href*="custom-invite"], a[href*="invite-connect"], a[href*="mynetwork/invite"]'
+      )) {
+        const el = aInvite as HTMLElement;
+        if (isVis(el)) {
+          doClick(el);
+          return true;
+        }
+      }
     }
     return false;
   });
@@ -869,7 +934,12 @@ async function clickConnectInOpenDropdown(page: Page): Promise<boolean> {
             const st = window.getComputedStyle(h);
             if (st.visibility === "hidden" || st.display === "none") continue;
             const href = (el.getAttribute("href") || "").toLowerCase();
-            if (href.includes("custom-invite")) return true;
+            if (
+              href.includes("custom-invite") ||
+              href.includes("invite-connect") ||
+              href.includes("mynetwork/invite")
+            )
+              return true;
             if (el.getAttribute("role") === "menuitem") {
               const t = (el.textContent || "").replace(/\s+/g, " ").trim();
               if (/^conectar$/i.test(t) || /^connect$/i.test(t)) return true;
@@ -914,12 +984,11 @@ async function clickConnectInOpenDropdown(page: Page): Promise<boolean> {
     page.locator('[role="menuitem"]').filter({ hasText: /^Conectar$/ }),
     page.locator('[role="menuitem"]').filter({ hasText: /^Connect$/ }),
     page.locator('[role="menuitem"]').filter({ hasText: /conectar/i }),
-    page.locator('a[role="menuitem"][href*="custom-invite"]'),
-    page.locator('a[role="menuitem"][href*="preload/custom-invite"]'),
-    page.locator('.artdeco-dropdown__content--is-open a[href*="custom-invite"]'),
-    page.locator('[class*="dropdown__content--is-open"] a[href*="custom-invite"]'),
-    page.locator('.artdeco-dropdown__content-inner a[href*="custom-invite"]'),
-    page.locator('[role="menu"] a[href*="custom-invite"]'),
+    page.locator(A_MENUITEM_INVITE),
+    page.locator(".artdeco-dropdown__content--is-open").locator(A_INVITE_FLOW),
+    page.locator('[class*="dropdown__content--is-open"]').locator(A_INVITE_FLOW),
+    page.locator(".artdeco-dropdown__content-inner").locator(A_INVITE_FLOW),
+    page.locator('[role="menu"]').locator(A_INVITE_FLOW),
     page.locator('[role="menu"] li').filter({ hasText: /^Conectar$/i }),
     page.locator('[role="menu"] li').filter({ has: page.locator("svg#connect-small") }),
     page.locator('[role="menuitem"]').filter({ has: page.locator("svg#connect-small") }),
@@ -957,7 +1026,12 @@ async function clickConnectInOpenDropdown(page: Page): Promise<boolean> {
 
     const rowLooksLikeConnect = (el: HTMLElement): boolean => {
       const href = (el.getAttribute("href") || "").toLowerCase();
-      if (href.includes("custom-invite")) return true;
+      if (
+        href.includes("custom-invite") ||
+        href.includes("invite-connect") ||
+        href.includes("mynetwork/invite")
+      )
+        return true;
       const hasIcon = !!el.querySelector("svg#connect-small");
       const text = (el.textContent || "").replace(/\s+/g, " ").trim();
       const al = (el.getAttribute("aria-label") || "").toLowerCase();
@@ -989,7 +1063,9 @@ async function clickConnectInOpenDropdown(page: Page): Promise<boolean> {
         return true;
       }
 
-      for (const a of p.querySelectorAll('a[href*="custom-invite"], a[href*="preload/custom-invite"]')) {
+      for (const a of p.querySelectorAll(
+        'a[href*="custom-invite"], a[href*="preload/custom-invite"], a[href*="invite-connect"], a[href*="mynetwork/invite"]'
+      )) {
         const el = a as HTMLElement;
         if (!visibleEnough(el)) continue;
         clickEl(el);
@@ -1036,7 +1112,15 @@ async function clickConnectInOpenDropdown(page: Page): Promise<boolean> {
 async function clickConnectRobust(page: Page): Promise<boolean> {
   const tryInTopCard = async (root: Locator): Promise<boolean> => {
     if (!(await root.isVisible({ timeout: 900 }).catch(() => false))) return false;
-    if (await tryClickNthVisible(root.locator('a[href*="custom-invite"], a[href*="preload/custom-invite"]'))) {
+    if (
+      await tryClickNthVisible(
+        root.locator(A_INVITE_FLOW).filter({
+          hasNot: page.locator(
+            '[aria-label*="pendiente" i], [aria-label*="pending" i], [aria-label*="retirar" i], [aria-label*="withdraw" i]'
+          ),
+        })
+      )
+    ) {
       return true;
     }
     if (
@@ -1059,27 +1143,45 @@ async function clickConnectRobust(page: Page): Promise<boolean> {
     return false;
   };
 
+  if (await tryInTopCard(profileActionStripGlobal(page))) return true;
   if (await tryInTopCard(profileTopActionBar(page))) return true;
   if (await tryInTopCard(profileTopActionBarFallback(page))) return true;
 
   // Nuevo UI: top card (con Conectar) está ANTES de <main> — buscar en toda la página
   // Prioridad máxima: <a role="menuitem" href*=custom-invite> (dentro del popover del menú Más)
-  if (await tryClickNthVisible(page.locator('a[role="menuitem"][href*="custom-invite"]').filter({
-    hasNot: page.locator('[aria-label*="pendiente" i], [aria-label*="pending" i], [aria-label*="retirar" i], [aria-label*="withdraw" i]'),
-  }))) return true;
-  if (await tryClickNthVisible(page.locator('a[href*="custom-invite"], a[href*="preload/custom-invite"]').filter({
-    hasNot: page.locator('[aria-label*="pendiente" i], [aria-label*="pending" i], [aria-label*="retirar" i], [aria-label*="withdraw" i]'),
-  }))) return true;
+  if (
+    await tryClickNthVisible(
+      page.locator(A_MENUITEM_INVITE).filter({
+        hasNot: page.locator(
+          '[aria-label*="pendiente" i], [aria-label*="pending" i], [aria-label*="retirar" i], [aria-label*="withdraw" i]'
+        ),
+      })
+    )
+  )
+    return true;
+  if (
+    await tryClickNthVisible(
+      page.locator(A_INVITE_FLOW).filter({
+        hasNot: page.locator(
+          '[aria-label*="pendiente" i], [aria-label*="pending" i], [aria-label*="retirar" i], [aria-label*="withdraw" i]'
+        ),
+      })
+    )
+  )
+    return true;
 
   // LinkedIn minifies class names — fallback: search the entire main without relying on class selectors.
   const mainLoc = page.locator("main");
   if (
     await tryClickNthVisible(
-      mainLoc
-        .locator('a[href*="custom-invite"]')
-        .filter({ hasNot: page.locator('[aria-label*="pendiente" i], [aria-label*="pending" i], [aria-label*="retirar" i], [aria-label*="withdraw" i]') })
+      mainLoc.locator(A_INVITE_FLOW).filter({
+        hasNot: page.locator(
+          '[aria-label*="pendiente" i], [aria-label*="pending" i], [aria-label*="retirar" i], [aria-label*="withdraw" i]'
+        ),
+      })
     )
-  ) return true;
+  )
+    return true;
   if (
     await tryClickNthVisible(
       mainLoc
@@ -1097,7 +1199,7 @@ async function clickConnectRobust(page: Page): Promise<boolean> {
   for (let i = 0; i < Math.min(pn, 8); i++) {
     const panel = panels.nth(i);
     if (!(await panel.isVisible({ timeout: 500 }).catch(() => false))) continue;
-    if (await tryClickNthVisible(panel.locator('a[href*="custom-invite"]'))) return true;
+    if (await tryClickNthVisible(panel.locator(A_INVITE_FLOW))) return true;
     if (
       await tryClickNthVisible(
         panel.locator('[role="menuitem"]').filter({ has: page.locator("svg#connect-small") })
@@ -1111,10 +1213,21 @@ async function clickConnectRobust(page: Page): Promise<boolean> {
   }
 
   return page.evaluate(() => {
-    const hrefHasInvite = (a: HTMLAnchorElement) =>
-      (a.getAttribute("href") || "").toLowerCase().includes("custom-invite");
+    const hrefHasInvite = (a: HTMLAnchorElement) => {
+      const h = (a.getAttribute("href") || "").toLowerCase();
+      return (
+        h.includes("custom-invite") ||
+        h.includes("invite-connect") ||
+        h.includes("mynetwork/invite")
+      );
+    };
 
     const scopes: Element[] = [];
+    const strip =
+      document.querySelector("[class*='pvs-profile-actions']") ||
+      document.querySelector("[data-view-name*='profile-top-card']") ||
+      document.querySelector("[class*='TopcardList']");
+    if (strip) scopes.push(strip);
     const bar = document.querySelector("main [class*='pvs-profile-actions']") ||
                 document.querySelector("[class*='pvs-profile-actions']");
     const list = document.querySelector("main .pv-top-card--list") ||
@@ -1134,7 +1247,7 @@ async function clickConnectRobust(page: Page): Promise<boolean> {
 
     for (const scope of scopes) {
       for (const a of scope.querySelectorAll(
-        'a[href*="custom-invite"], a[href*="preload/custom-invite"]'
+        'a[href*="custom-invite"], a[href*="preload/custom-invite"], a[href*="invite-connect"], a[href*="mynetwork/invite"]'
       )) {
         const el = a as HTMLElement;
         if (el.offsetParent === null) continue;
@@ -1188,7 +1301,7 @@ async function completeLinkedInInviteAfterConnectClick(
   page: Page,
   note?: string
 ): Promise<{ ok: boolean; error?: string }> {
-  const inviteUrlRe = /custom-invite|invite-send|mynetwork\/invite|\/invite\//i;
+  const inviteUrlRe = /custom-invite|invite-connect|invite-send|mynetwork\/invite|\/invite\//i;
 
   const hasInviteSurface = async (): Promise<boolean> => {
     if (inviteUrlRe.test(page.url())) return true;
@@ -1448,13 +1561,22 @@ export async function sendConnectionRequest(
 
   // Fallback final: clic forzado en Más por geometría + buscar Conectar en CUALQUIER lugar de la página
   if (!clicked) {
-    // Primero verificar si el drawer ya está abierto (para no volver a clickar Más y cerrarlo)
+    // Verificar si el dropdown/popover ya está abierto — buscar SOLO dentro de [popover] o [role=menu]
+    // (las sugerencias de conexión en la página también tienen div[aria-label*=conectar] y son false positivos)
     const drawerAlreadyOpen = await page.evaluate(() => {
-      for (const el of document.querySelectorAll("div[aria-label]")) {
-        const h = el as HTMLElement;
-        if (!h.offsetParent) continue;
-        const al = (h.getAttribute("aria-label") || "").toLowerCase();
-        if (!/conectar|connect/i.test(al)) continue;
+      const containers = [
+        ...Array.from(document.querySelectorAll('[popover], [role="menu"]')),
+      ];
+      for (const c of containers) {
+        const h = c as HTMLElement;
+        const st = window.getComputedStyle(h);
+        if (st.display === "none") continue;
+        if (
+          h.querySelector(
+            'a[href*="custom-invite"], a[href*="invite-connect"], a[href*="mynetwork/invite"]'
+          )
+        )
+          return true;
         if (h.querySelector("svg#connect-small")) return true;
       }
       return false;
@@ -1470,9 +1592,19 @@ export async function sendConnectionRequest(
         if (el.offsetParent === null) continue;
         const lb = (el.getAttribute("aria-label") || "").toLowerCase().trim();
         const text = (el.textContent || "").replace(/\s+/g, " ").trim().toLowerCase();
-        const hasSvg = !!el.querySelector("svg#overflow-web-ios-small");
+        const svg = el.querySelector("svg");
+        const useHref = (
+          svg?.querySelector("use")?.getAttribute("href") ||
+          svg?.querySelector("use")?.getAttribute("xlink:href") ||
+          ""
+        ).toLowerCase();
+        const svgId = (svg?.id || "").toLowerCase();
+        const hasOverflowSvg =
+          !!el.querySelector("svg#overflow-web-ios-small") ||
+          svgId.includes("overflow") ||
+          useHref.includes("overflow");
         // Nuevo UI: sin aria-label, sin SVG → detectar por texto "Más"
-        if (!hasSvg && lb !== "más" && lb !== "more" && text !== "más" && text !== "more") continue;
+        if (!hasOverflowSvg && lb !== "más" && lb !== "more" && text !== "más" && text !== "more") continue;
         const r = el.getBoundingClientRect();
         if (r.width < 2 || r.height < 2 || r.top < 0 || r.top > maxY) continue;
         if (el.closest("[data-urn], .feed-shared-update-v2, article")) continue;
@@ -1486,79 +1618,63 @@ export async function sendConnectionRequest(
     });
 
     if (masClicked) {
-      // Esperar activamente hasta 15s a que aparezca "Conectar" en cualquier lugar
+      // Esperar hasta 15s a que aparezca el dropdown/popover con "Conectar".
+      // Buscar SOLO dentro de [popover] o [role=menu] para evitar falsos positivos
+      // de las sugerencias de conexión que también tienen custom-invite y svg#connect-small.
       await page.waitForFunction(() => {
-        const isVisible = (el: HTMLElement) => {
-          if (!el.offsetParent && el.tagName !== "BODY") return false;
-          const r = el.getBoundingClientRect();
-          if (r.width < 2 || r.height < 2) return false;
-          const st = window.getComputedStyle(el);
-          return st.visibility !== "hidden" && st.display !== "none" && parseFloat(st.opacity) > 0.05;
-        };
-        // Buscar en TODOS los elementos (drawer puede usar <div>, <a>, <button>, <li>, etc.)
-        for (const el of document.querySelectorAll("*")) {
-          const h = el as HTMLElement;
-          if (!isVisible(h)) continue;
-          const text = (h.textContent || "").replace(/\s+/g, " ").trim();
-          const href = (h.getAttribute("href") || "").toLowerCase();
-          if (href.includes("custom-invite")) return true;
-          // Nuevo UI: <div aria-label="Invita a X a conectar"> con svg#connect-small
-          const ariaLabel = (h.getAttribute("aria-label") || "").toLowerCase();
-          if (/conectar|connect/i.test(ariaLabel) && h.querySelector("svg#connect-small")) return true;
-          if (/^conectar$/i.test(text) || /^connect$/i.test(text) ||
-              /^conectar\s+con\s+/i.test(text)) {
-            // Verificar que sea un elemento clickable (no solo un contenedor de texto)
-            const tag = h.tagName.toLowerCase();
-            const role = (h.getAttribute("role") || "").toLowerCase();
-            if (["a", "button", "li", "div"].includes(tag) || ["button", "menuitem", "option", "link"].includes(role)) {
-              return true;
-            }
+        const containers = [
+          ...Array.from(document.querySelectorAll('[popover], [role="menu"]')),
+        ];
+        for (const c of containers) {
+          const h = c as HTMLElement;
+          const st = window.getComputedStyle(h);
+          if (st.display === "none") continue;
+          const r = h.getBoundingClientRect();
+          if (r.height < 10) continue;
+          if (
+            h.querySelector(
+              'a[href*="custom-invite"], a[href*="invite-connect"], a[href*="mynetwork/invite"]'
+            )
+          )
+            return true;
+          if (h.querySelector('a[role="menuitem"]')) {
+            const text = (h.textContent || "").replace(/\s+/g, " ");
+            if (/conectar|connect/i.test(text)) return true;
           }
         }
         return false;
       }, { timeout: 15000 }).catch(() => {});
 
-      // Ahora hacer clic en el elemento encontrado
+      // Clic — buscar dentro de [popover] o [role=menu] únicamente
       clicked = await page.evaluate(() => {
-        const isVisible = (el: HTMLElement) => {
-          if (!el.offsetParent && el.tagName !== "BODY") return false;
-          const r = el.getBoundingClientRect();
-          if (r.width < 2 || r.height < 2) return false;
-          const st = window.getComputedStyle(el);
-          return st.visibility !== "hidden" && st.display !== "none" && parseFloat(st.opacity) > 0.05;
+        const doClick = (el: HTMLElement) => {
+          el.scrollIntoView({ block: "nearest", inline: "nearest" });
+          el.click();
         };
+        const reject = (s: string) => /pendiente|pending|requested|retirar|withdraw/i.test(s);
 
-        // Prioridad 1: div con svg#connect-small (nuevo UI ProfilePostConnectDrawer)
-        for (const el of document.querySelectorAll("div")) {
-          const h = el as HTMLElement;
-          if (!isVisible(h)) continue;
-          const ariaLabel = (h.getAttribute("aria-label") || "").toLowerCase();
-          if (/conectar|connect/i.test(ariaLabel) && h.querySelector("svg#connect-small")) {
-            if (/pendiente|pending|requested|retirar|withdraw/i.test(ariaLabel)) continue;
-            h.scrollIntoView({ block: "nearest", inline: "nearest" });
-            h.click();
-            return true;
-          }
-        }
+        for (const c of document.querySelectorAll('[popover], [role="menu"]')) {
+          const container = c as HTMLElement;
+          if (window.getComputedStyle(container).display === "none") continue;
 
-        // Prioridad 2: resto de elementos clickables
-        for (const el of document.querySelectorAll("a, button, li, [role='menuitem'], [role='button'], [role='option'], div")) {
-          const h = el as HTMLElement;
-          if (!isVisible(h)) continue;
-          const text = (h.textContent || "").replace(/\s+/g, " ").trim();
-          const label = (h.getAttribute("aria-label") || "").toLowerCase();
-          const href = (h.getAttribute("href") || "").toLowerCase();
-          if (/pendiente|pending|requested|retirar|withdraw/i.test(`${text} ${label}`)) continue;
-          if (href.includes("custom-invite")) {
-            h.scrollIntoView({ block: "nearest", inline: "nearest" });
-            h.click();
-            return true;
+          // Prioridad: enlaces de flujo de invitación
+          for (const a of container.querySelectorAll(
+            'a[href*="custom-invite"], a[href*="invite-connect"], a[href*="mynetwork/invite"]'
+          )) {
+            const h = a as HTMLElement;
+            if (!h.offsetParent && window.getComputedStyle(h).display === "none") continue;
+            const al = (h.querySelector("[aria-label]")?.getAttribute("aria-label") || "").toLowerCase();
+            if (!reject(al)) { doClick(h); return true; }
           }
-          if (/^conectar$/i.test(text) || /^connect$/i.test(text) ||
-              /^conectar\s+con\s+/i.test(text)) {
-            h.scrollIntoView({ block: "nearest", inline: "nearest" });
-            h.click();
-            return true;
+          // Fallback: cualquier menuitem con "Conectar"
+          for (const item of container.querySelectorAll('[role="menuitem"], a, li')) {
+            const h = item as HTMLElement;
+            const text = (h.textContent || "").replace(/\s+/g, " ").trim();
+            const al = (h.getAttribute("aria-label") || "").toLowerCase();
+            if (reject(`${text} ${al}`)) continue;
+            if (/^conectar$/i.test(text) || /^connect$/i.test(text)) {
+              doClick(h); return true;
+            }
           }
         }
         return false;
@@ -1566,6 +1682,16 @@ export async function sendConnectionRequest(
 
       if (!clicked) clicked = await clickConnectInOpenDropdown(page);
       if (!clicked) clicked = await clickConnectRobust(page);
+    }
+  }
+
+  if (!clicked) {
+    await scrollProfileTopCardIntoView(page);
+    await randomDelay(900, 1900);
+    clicked = await clickConnectRobust(page);
+    if (!clicked) {
+      const openedRetry = await openProfileOverflowMenu(page);
+      if (openedRetry) clicked = await clickConnectInOpenDropdown(page);
     }
   }
 
