@@ -220,10 +220,12 @@ export async function injectLiAt(page: Page, cookieValue: string): Promise<void>
   ]);
 
   // Navigate directly to feed (authenticated).
-  // Usamos "load" con timeout generoso; si LinkedIn va lento pero la cookie está
+  // Reintentamos hasta 4 veces con backoff; si LinkedIn va lento pero la cookie está
   // inyectada la sesión sigue siendo válida aunque el timeout se dispare.
+  const MAX_NAV_ATTEMPTS = 4;
+  const NAV_RETRY_DELAYS = [5000, 10000, 15000]; // ms entre reintentos
   let lastNavErr: unknown;
-  for (let attempt = 0; attempt < 2; attempt++) {
+  for (let attempt = 0; attempt < MAX_NAV_ATTEMPTS; attempt++) {
     try {
       await page.goto("https://www.linkedin.com/feed/", { waitUntil: "domcontentloaded", timeout: 90000 });
       lastNavErr = null;
@@ -236,10 +238,11 @@ export async function injectLiAt(page: Page, cookieValue: string): Promise<void>
         lastNavErr = null;
         break;
       }
-      // about:blank o URL no-linkedin → reintento solo en primer intento
-      if (attempt === 0) {
-        await new Promise((r) => setTimeout(r, 3000));
-      }
+      const msg = e instanceof Error ? e.message : String(e);
+      const isNetErr = /ERR_TIMED_OUT|ERR_NAME_NOT_RESOLVED|ERR_CONNECTION|ERR_NETWORK|net::/i.test(msg);
+      if (!isNetErr || attempt >= MAX_NAV_ATTEMPTS - 1) break;
+      const waitMs = NAV_RETRY_DELAYS[attempt] ?? 15000;
+      await new Promise((r) => setTimeout(r, waitMs));
     }
   }
   if (lastNavErr !== null) {
