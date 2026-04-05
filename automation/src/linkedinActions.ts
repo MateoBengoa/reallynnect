@@ -2354,47 +2354,82 @@ export async function commentLeadRecentPost(page: Page, profileUrl: string, comm
   await openProfilePostsSection(page, profileUrl);
 
   const inMain = page.locator("main");
-  await inMain.locator(".feed-shared-update-v2").first().waitFor({ state: "visible", timeout: 22000 }).catch(() => {});
+  // Actividad / posts: a veces no hay .feed-shared-update-v2; esperar barra social o botón Comentar
+  await Promise.race([
+    inMain.locator(".feed-shared-update-v2").first().waitFor({ state: "visible", timeout: 18000 }),
+    inMain.locator("button.comment-button, button[class*='comment-button']").first().waitFor({ state: "visible", timeout: 18000 }),
+    inMain.locator('[id^="feed-shared-social-action-bar-comment"]').first().waitFor({ state: "visible", timeout: 18000 }),
+    inMain.getByRole("button", { name: /^Comentar$|^Comment$/i }).first().waitFor({ state: "visible", timeout: 18000 }),
+    inMain.locator('button[aria-label="Comentar"], button[aria-label="Comment"]').first().waitFor({ state: "visible", timeout: 18000 }),
+  ]).catch(() => {});
 
-  let opened = await page.evaluate(() => {
-    const root = document.querySelector("main");
-    if (!root) return false;
-    const card = root.querySelector(".feed-shared-update-v2");
-    const searchRoot = card ?? root;
+  const clickCommentTriggers = [
+    inMain.locator(".feed-shared-update-v2").first().locator('button[aria-label="Comentar"]'),
+    inMain.locator(".feed-shared-update-v2").first().locator('button[aria-label="Comment"]'),
+    inMain.locator(".feed-shared-update-v2").first().locator("button.comment-button"),
+    inMain.locator(".feed-shared-update-v2").first().locator("button:has(svg use[href*='comment-small'])"),
+    inMain.locator('[id^="feed-shared-social-action-bar-comment"]'),
+    inMain.locator("button.comment-button[aria-label='Comentar']"),
+    inMain.locator("button.social-actions-button.comment-button"),
+    inMain.locator("button:has(svg use[href*='comment-small'])"),
+    inMain.getByRole("button", { name: /^Comentar$|^Comment$/i }),
+    inMain.locator('button[aria-label="Comentar"]'),
+    inMain.locator('button[aria-label="Comment"]'),
+    inMain.locator("a, button").filter({ hasText: /^Comentar$/i }),
+  ];
 
-    // Nuevo UI: "Comentar" es un <a> sin aria-label, solo texto visible
-    for (const el of searchRoot.querySelectorAll("a, button")) {
-      const h = el as HTMLElement;
-      if (h.offsetParent === null) continue;
-      const label = (h.getAttribute("aria-label") || "").toLowerCase();
-      const text = (h.textContent || "").replace(/\s+/g, " ").trim();
-      if (/comment|comentar|open comments|ver comentarios|add a comment/i.test(label)) {
-        h.click();
-        return true;
-      }
-      if (/^comentar$/i.test(text) || /^comment$/i.test(text)) {
-        h.click();
-        return true;
-      }
-    }
-    return false;
-  });
-
-  if (!opened) {
-    // Buscar <a> o button con texto "Comentar" en la primera tarjeta o en main
-    const comentarLink = inMain.locator("a, button").filter({ hasText: /^Comentar$/i }).first();
-    if (await comentarLink.isVisible({ timeout: 7000 }).catch(() => false)) {
-      await comentarLink.click({ timeout: 5000 }).catch(() => {});
-      opened = true;
-    }
+  let opened = false;
+  for (const loc of clickCommentTriggers) {
+    const el = loc.first();
+    if (!(await el.isVisible({ timeout: 2200 }).catch(() => false))) continue;
+    await el.scrollIntoViewIfNeeded().catch(() => {});
+    await randomDelay(120, 350);
+    await el.click({ timeout: 7000 }).catch(() => {});
+    opened = true;
+    break;
   }
 
   if (!opened) {
-    const c = inMain.getByRole("button", { name: /Comment|Comentar/i }).first();
-    if (await c.isVisible({ timeout: 4000 }).catch(() => false)) {
-      await c.click({ timeout: 5000 }).catch(() => {});
-      opened = true;
-    }
+    opened = await page.evaluate(() => {
+      const root = document.querySelector("main");
+      if (!root) return false;
+      const card = root.querySelector(".feed-shared-update-v2");
+      const scope = (card ?? root) as HTMLElement;
+
+      const tryClick = (b: Element | null | undefined): boolean => {
+        const h = b as HTMLElement | null | undefined;
+        if (!h || !h.offsetParent) return false;
+        h.scrollIntoView({ block: "nearest", inline: "nearest" });
+        h.click();
+        return true;
+      };
+
+      // Misma UI que barra social (Actividad): aria-label="Comentar" + comment-button
+      for (const b of scope.querySelectorAll("button")) {
+        const al = (b.getAttribute("aria-label") || "").trim();
+        if (/^comentar$/i.test(al) || /^comment$/i.test(al)) {
+          if (tryClick(b)) return true;
+        }
+      }
+      const byId = scope.querySelector("[id^='feed-shared-social-action-bar-comment']");
+      if (tryClick(byId)) return true;
+
+      for (const el of scope.querySelectorAll("a, button")) {
+        const h = el as HTMLElement;
+        if (!h.offsetParent) continue;
+        const label = (h.getAttribute("aria-label") || "").toLowerCase();
+        const text = (h.textContent || "").replace(/\s+/g, " ").trim();
+        if (/comment|comentar|open comments|ver comentarios|add a comment/i.test(label)) {
+          h.click();
+          return true;
+        }
+        if (/^comentar$/i.test(text) || /^comment$/i.test(text)) {
+          h.click();
+          return true;
+        }
+      }
+      return false;
+    });
   }
 
   if (!opened) {
@@ -2403,27 +2438,32 @@ export async function commentLeadRecentPost(page: Page, profileUrl: string, comm
     return { ok: false, error: "comment_button_missing" };
   }
 
-  await randomDelay(900, 1800);
+  await randomDelay(900, 2000);
 
   const text = commentText.slice(0, 3000);
-  // Nuevo UI puede navegar a la página del post; esperar editor
-  const editorSelectors = [
-    ".comments-comment-box textarea",
-    ".comments-comment-texteditor textarea",
-    ".comments-comment-box__form textarea",
-    ".comments-comment-box [contenteditable='true']",
-    ".comments-comment-texteditor [contenteditable='true']",
-    "div[contenteditable='true'][role='textbox']",
-    "div[contenteditable='true']",
-    "textarea",
+  const commentBox = page.locator(".comments-comment-box").first();
+  await commentBox.waitFor({ state: "visible", timeout: 16000 }).catch(() => {});
+
+  const editorCandidates = [
+    commentBox.locator(".comments-comment-texteditor textarea"),
+    commentBox.locator("textarea").first(),
+    commentBox.locator(".comments-comment-texteditor [contenteditable='true']"),
+    commentBox.locator("[contenteditable='true']").first(),
+    commentBox.locator("div[role='textbox']"),
+    page.locator(".comments-comment-box textarea"),
+    page.locator(".comments-comment-texteditor textarea"),
+    page.locator(".comments-comment-box__form textarea"),
+    page.locator(".comments-comment-box [contenteditable='true']"),
+    page.locator(".comments-comment-texteditor [contenteditable='true']"),
+    page.locator("div[contenteditable='true'][role='textbox']"),
   ];
 
   let filled = false;
-  for (const sel of editorSelectors) {
-    const el = page.locator(sel).first();
-    if (!(await el.isVisible({ timeout: sel.includes("comments") ? 9000 : 3000 }).catch(() => false))) continue;
+  for (const el of editorCandidates) {
+    if (!(await el.isVisible({ timeout: 8000 }).catch(() => false))) continue;
     const tag = (await el.evaluate((n) => n.tagName).catch(() => "")) || "";
     if (tag.toLowerCase() === "textarea") {
+      await el.click({ timeout: 3000 }).catch(() => {});
       await el.fill(text).catch(() => {});
     } else {
       await el.click({ timeout: 3000 }).catch(() => {});
@@ -2452,12 +2492,29 @@ export async function commentLeadRecentPost(page: Page, profileUrl: string, comm
     return { ok: false, error: "comment_editor_missing" };
   }
 
-  await randomDelay(400, 900);
+  await randomDelay(500, 1100);
 
-  const postBtn = page.getByRole("button", { name: /^Post$|^Publicar$|^Comentar$|^Comment$/i }).first();
-  if (await postBtn.isVisible({ timeout: 5000 }).catch(() => false)) {
-    await postBtn.click({ timeout: 6000 }).catch(() => {});
-  } else {
+  // Enviar: botón primario del cajón (p. ej. comments-comment-box__submit-button--cr), no el de la barra
+  const submitCandidates = [
+    page.locator("button.comments-comment-box__submit-button--cr"),
+    page.locator(".comments-comment-box button.comments-comment-box__submit-button--cr"),
+    commentBox.locator("button.artdeco-button--primary").filter({ hasText: /^Comentar$|^Comment$|^Post$|^Publicar$/i }),
+    commentBox.getByRole("button", { name: /^Comentar$|^Comment$|^Post$|^Publicar$/i }),
+    page.getByRole("button", { name: /^Post$|^Publicar$/i }),
+  ];
+
+  let submitted = false;
+  for (const sb of submitCandidates) {
+    const b = sb.first();
+    if (await b.isVisible({ timeout: 4000 }).catch(() => false)) {
+      await b.scrollIntoViewIfNeeded().catch(() => {});
+      await b.click({ timeout: 8000 }).catch(() => {});
+      submitted = true;
+      break;
+    }
+  }
+
+  if (!submitted) {
     await page.keyboard.press("Enter").catch(() => {});
   }
 
