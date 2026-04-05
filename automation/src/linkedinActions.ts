@@ -717,75 +717,119 @@ async function tryClickNthVisible(loc: Locator, max?: number): Promise<boolean> 
 async function clickConnectInOpenDropdown(page: Page): Promise<boolean> {
   await randomDelay(650, 1300);
 
-  // Nuevo UI: ProfilePostConnectDrawer — esperar activamente hasta 15s a que aparezca
-  // el <div aria-label="Invita a X a conectar"> con svg#connect-small.
-  await page.waitForFunction(() => {
-    const isVisible = (el: HTMLElement) => {
+  // Selector de paneles que cubre TODAS las variantes de LinkedIn:
+  // - pvs-overflow-actions-dropdown__content (nuevo UI perfil)
+  // - artdeco-dropdown__content--is-open / artdeco-dropdown__content-inner (UI clásico)
+  // - ProfilePostConnectDrawer (drawer de React)
+  // - role="menu"
+  const PANEL_SEL = [
+    "[class*='pvs-overflow-actions-dropdown']",
+    ".artdeco-dropdown__content--is-open",
+    '[class*="dropdown__content--is-open"]',
+    ".artdeco-dropdown__content-inner",
+    '[class*="artdeco-dropdown__content-inner"]',
+    '[role="menu"]',
+  ].join(", ");
+
+  const isVisibleFn = `
+    const isVis = (el) => {
       if (!el.offsetParent && el.tagName !== "BODY") return false;
       const r = el.getBoundingClientRect();
       if (r.width < 3 || r.height < 3) return false;
       const st = window.getComputedStyle(el);
       return st.visibility !== "hidden" && st.display !== "none" && parseFloat(st.opacity ?? "1") > 0.05;
     };
-    for (const el of document.querySelectorAll("div[aria-label], svg#connect-small")) {
-      const h = el as HTMLElement;
-      if (!isVisible(h)) continue;
-      if (el.tagName.toLowerCase() === "svg") {
-        const row = h.closest("div[aria-label], [role='menuitem'], li") as HTMLElement | null;
-        if (row && isVisible(row)) {
-          const al = (row.getAttribute("aria-label") || "").toLowerCase();
-          if (/conectar|connect/i.test(al) && !/pendiente|pending|requested/i.test(al)) return true;
-        }
-        continue;
-      }
-      const al = (h.getAttribute("aria-label") || "").toLowerCase();
-      if (/conectar|connect/i.test(al) && !/pendiente|pending|requested/i.test(al) && h.querySelector("svg#connect-small")) return true;
+  `;
+  void isVisibleFn; // solo para documentación
+
+  // Esperar activamente hasta 15s a que aparezca un elemento "Conectar" en CUALQUIER panel
+  await page.waitForFunction(() => {
+    const isVis = (el: HTMLElement) => {
+      if (!el.offsetParent && el.tagName !== "BODY") return false;
+      const r = el.getBoundingClientRect();
+      if (r.width < 3 || r.height < 3) return false;
+      const st = window.getComputedStyle(el);
+      return st.visibility !== "hidden" && st.display !== "none" && parseFloat(st.opacity ?? "1") > 0.05;
+    };
+    const reject = (s: string) => /pendiente|pending|requested|withdraw|retirar/i.test(s);
+
+    // 1. svg#connect-small visible en cualquier lugar (indica opción Conectar)
+    for (const svg of document.querySelectorAll("svg#connect-small")) {
+      const h = svg as HTMLElement;
+      if (!h.offsetParent) continue;
+      const r = h.getBoundingClientRect();
+      if (r.width < 1 || r.height < 1) continue;
+      return true;
     }
-    // También aceptar artdeco/role=menu con "Conectar" (UI viejo)
-    for (const panel of document.querySelectorAll('.artdeco-dropdown__content--is-open, [role="menu"]')) {
-      const p = panel as HTMLElement;
-      const pr = p.getBoundingClientRect();
-      if (pr.height < 12) continue;
-      for (const el of p.querySelectorAll('[role="menuitem"], li')) {
-        const t = (el.textContent || "").replace(/\s+/g, " ").trim();
-        if (/^conectar$/i.test(t) || /^connect$/i.test(t)) return true;
-        if ((el as HTMLElement).querySelector("svg#connect-small")) return true;
-      }
+    // 2. div[aria-label*=conectar] (ProfilePostConnectDrawer)
+    for (const el of document.querySelectorAll("div[aria-label]")) {
+      const h = el as HTMLElement;
+      if (!isVis(h)) continue;
+      const al = (h.getAttribute("aria-label") || "").toLowerCase();
+      if (!/conectar|connect/i.test(al) || reject(al)) continue;
+      return true;
+    }
+    // 3. Texto "Conectar" en cualquier item de dropdown (artdeco-dropdown__item, pvs-overflow, menuitem)
+    for (const el of document.querySelectorAll(
+      '[class*="artdeco-dropdown__item"], [class*="pvs-overflow"], [role="menuitem"], .artdeco-dropdown__content--is-open li'
+    )) {
+      const h = el as HTMLElement;
+      if (!isVis(h)) continue;
+      const t = (h.textContent || "").replace(/\s+/g, " ").trim();
+      if (reject(t)) continue;
+      if (/^conectar$/i.test(t) || /^connect$/i.test(t)) return true;
     }
     return false;
   }, { timeout: 15000 }).catch(() => {});
 
-  // Ahora hacer clic
+  // Hacer clic en el elemento Conectar encontrado — búsqueda amplia sin depender del contenedor
   const drawerClicked = await page.evaluate(() => {
-    const isVisible = (el: HTMLElement) => {
+    const isVis = (el: HTMLElement) => {
       if (!el.offsetParent && el.tagName !== "BODY") return false;
       const r = el.getBoundingClientRect();
       if (r.width < 3 || r.height < 3) return false;
       const st = window.getComputedStyle(el);
       return st.visibility !== "hidden" && st.display !== "none" && parseFloat(st.opacity ?? "1") > 0.05;
     };
-    // Buscar div con aria-label que contenga "conectar"/"connect" y svg#connect-small
-    for (const el of document.querySelectorAll("div[aria-label]")) {
-      const h = el as HTMLElement;
-      if (!isVisible(h)) continue;
-      const al = (h.getAttribute("aria-label") || "").toLowerCase();
-      if (!/conectar|connect/i.test(al)) continue;
-      if (/pendiente|pending|requested|retirar|withdraw/i.test(al)) continue;
-      if (!h.querySelector("svg#connect-small")) continue;
-      h.scrollIntoView({ block: "nearest", inline: "nearest" });
-      h.click();
-      return true;
-    }
-    // También buscar por svg#connect-small directamente y subir al contenedor clickable
+    const reject = (s: string) => /pendiente|pending|requested|withdraw|retirar/i.test(s);
+    const doClick = (el: HTMLElement) => {
+      el.scrollIntoView({ block: "nearest", inline: "nearest" });
+      el.click();
+    };
+
+    // 1. svg#connect-small → subir al contenedor clickable
     for (const svg of document.querySelectorAll("svg#connect-small")) {
-      const row = (svg as HTMLElement).closest("div[aria-label], [role='menuitem'], li, a") as HTMLElement | null;
-      if (!row || !isVisible(row)) continue;
+      const row = (svg as HTMLElement).closest(
+        "div[aria-label], [role='menuitem'], [class*='artdeco-dropdown__item'], [class*='pvs-overflow'], li, a"
+      ) as HTMLElement | null;
+      if (!row || !isVis(row)) continue;
       const al = (row.getAttribute("aria-label") || "").toLowerCase();
       const text = (row.textContent || "").replace(/\s+/g, " ").trim();
-      if (/pendiente|pending|requested/i.test(`${al} ${text}`)) continue;
+      if (reject(`${al} ${text}`)) continue;
       if (/conectar|connect/i.test(al) || /^conectar$/i.test(text) || /^connect$/i.test(text)) {
-        row.scrollIntoView({ block: "nearest", inline: "nearest" });
-        row.click();
+        doClick(row);
+        return true;
+      }
+    }
+    // 2. div[aria-label*=conectar] (drawer nuevo UI)
+    for (const el of document.querySelectorAll("div[aria-label]")) {
+      const h = el as HTMLElement;
+      if (!isVis(h)) continue;
+      const al = (h.getAttribute("aria-label") || "").toLowerCase();
+      if (!/conectar|connect/i.test(al) || reject(al)) continue;
+      doClick(h);
+      return true;
+    }
+    // 3. artdeco-dropdown__item / pvs-overflow / menuitem con texto "Conectar"
+    for (const el of document.querySelectorAll(
+      '[class*="artdeco-dropdown__item"], [class*="pvs-overflow"], [role="menuitem"]'
+    )) {
+      const h = el as HTMLElement;
+      if (!isVis(h)) continue;
+      const text = (h.textContent || "").replace(/\s+/g, " ").trim();
+      if (reject(text)) continue;
+      if (/^conectar$/i.test(text) || /^connect$/i.test(text)) {
+        doClick(h);
         return true;
       }
     }
@@ -797,6 +841,7 @@ async function clickConnectInOpenDropdown(page: Page): Promise<boolean> {
     .waitForFunction(
       () => {
         const panelSel = [
+          "[class*='pvs-overflow-actions-dropdown']",
           ".artdeco-dropdown__content--is-open",
           '[class*="dropdown__content--is-open"]',
           ".artdeco-dropdown__content-inner",
@@ -836,7 +881,7 @@ async function clickConnectInOpenDropdown(page: Page): Promise<boolean> {
     .catch(() => {});
 
   const openPanel = page.locator(
-    '.artdeco-dropdown__content--is-open, [class*="dropdown__content--is-open"], .artdeco-dropdown__content-inner, [class*="artdeco-dropdown__content-inner"], [role="menu"]'
+    '[class*="pvs-overflow-actions-dropdown"], .artdeco-dropdown__content--is-open, [class*="dropdown__content--is-open"], .artdeco-dropdown__content-inner, [class*="artdeco-dropdown__content-inner"], [role="menu"]'
   );
 
   const scopedMenuItems = (inner: Locator): Locator[] => [
@@ -904,7 +949,7 @@ async function clickConnectInOpenDropdown(page: Page): Promise<boolean> {
 
     const inMenuPanel = (el: HTMLElement) =>
       !!el.closest(
-        '[role="menu"], .artdeco-dropdown__content--is-open, [class*="dropdown__content"], .artdeco-dropdown__content-inner, [class*="artdeco-dropdown__content-inner"]'
+        '[role="menu"], [class*="pvs-overflow-actions-dropdown"], .artdeco-dropdown__content--is-open, [class*="dropdown__content"], .artdeco-dropdown__content-inner, [class*="artdeco-dropdown__content-inner"]'
       );
 
     const rowLooksLikeConnect = (el: HTMLElement): boolean => {
@@ -927,13 +972,13 @@ async function clickConnectInOpenDropdown(page: Page): Promise<boolean> {
     };
 
     const panels = document.querySelectorAll(
-      '.artdeco-dropdown__content--is-open, [class*="dropdown__content--is-open"], .artdeco-dropdown__content-inner, [class*="artdeco-dropdown__content-inner"], [role="menu"]'
+      '[class*="pvs-overflow-actions-dropdown"], .artdeco-dropdown__content--is-open, [class*="dropdown__content--is-open"], .artdeco-dropdown__content-inner, [class*="artdeco-dropdown__content-inner"], [role="menu"]'
     );
     for (const panel of panels) {
       const p = panel as HTMLElement;
       if (!visibleEnough(p)) continue;
 
-      for (const item of p.querySelectorAll('[role="menuitem"]')) {
+      for (const item of p.querySelectorAll('[role="menuitem"], [class*="artdeco-dropdown__item"]')) {
         const el = item as HTMLElement;
         if (!visibleEnough(el) || !inMenuPanel(el)) continue;
         if (!rowLooksLikeConnect(el)) continue;
