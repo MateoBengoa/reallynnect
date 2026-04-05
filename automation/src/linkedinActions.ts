@@ -717,6 +717,45 @@ async function tryClickNthVisible(loc: Locator, max?: number): Promise<boolean> 
 async function clickConnectInOpenDropdown(page: Page): Promise<boolean> {
   await randomDelay(650, 1300);
 
+  // Nuevo UI: ProfilePostConnectDrawer — un <div> con aria-label "Invita a X a conectar"
+  // y svg#connect-small. No está dentro de ningún panel artdeco ni role="menu".
+  const drawerClicked = await page.evaluate(() => {
+    const isVisible = (el: HTMLElement) => {
+      if (!el.offsetParent && el.tagName !== "BODY") return false;
+      const r = el.getBoundingClientRect();
+      if (r.width < 3 || r.height < 3) return false;
+      const st = window.getComputedStyle(el);
+      return st.visibility !== "hidden" && st.display !== "none" && parseFloat(st.opacity ?? "1") > 0.05;
+    };
+    // Buscar div con aria-label que contenga "conectar"/"connect" y svg#connect-small
+    for (const el of document.querySelectorAll("div[aria-label]")) {
+      const h = el as HTMLElement;
+      if (!isVisible(h)) continue;
+      const al = (h.getAttribute("aria-label") || "").toLowerCase();
+      if (!/conectar|connect/i.test(al)) continue;
+      if (/pendiente|pending|requested|retirar|withdraw/i.test(al)) continue;
+      if (!h.querySelector("svg#connect-small")) continue;
+      h.scrollIntoView({ block: "nearest", inline: "nearest" });
+      h.click();
+      return true;
+    }
+    // También buscar por svg#connect-small directamente y subir al contenedor clickable
+    for (const svg of document.querySelectorAll("svg#connect-small")) {
+      const row = (svg as HTMLElement).closest("div[aria-label], [role='menuitem'], li, a") as HTMLElement | null;
+      if (!row || !isVisible(row)) continue;
+      const al = (row.getAttribute("aria-label") || "").toLowerCase();
+      const text = (row.textContent || "").replace(/\s+/g, " ").trim();
+      if (/pendiente|pending|requested/i.test(`${al} ${text}`)) continue;
+      if (/conectar|connect/i.test(al) || /^conectar$/i.test(text) || /^connect$/i.test(text)) {
+        row.scrollIntoView({ block: "nearest", inline: "nearest" });
+        row.click();
+        return true;
+      }
+    }
+    return false;
+  });
+  if (drawerClicked) return true;
+
   await page
     .waitForFunction(
       () => {
@@ -1320,7 +1359,19 @@ export async function sendConnectionRequest(
 
   // Fallback final: clic forzado en Más por geometría + buscar Conectar en CUALQUIER lugar de la página
   if (!clicked) {
-    const masClicked = await page.evaluate(() => {
+    // Primero verificar si el drawer ya está abierto (para no volver a clickar Más y cerrarlo)
+    const drawerAlreadyOpen = await page.evaluate(() => {
+      for (const el of document.querySelectorAll("div[aria-label]")) {
+        const h = el as HTMLElement;
+        if (!h.offsetParent) continue;
+        const al = (h.getAttribute("aria-label") || "").toLowerCase();
+        if (!/conectar|connect/i.test(al)) continue;
+        if (h.querySelector("svg#connect-small")) return true;
+      }
+      return false;
+    });
+
+    const masClicked = drawerAlreadyOpen || await page.evaluate(() => {
       const vh = window.innerHeight;
       const maxY = vh * 0.92;
       // Buscar botón Más en todo el documento por geometría
