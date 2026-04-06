@@ -1303,51 +1303,70 @@ async function completeLinkedInInviteAfterConnectClick(
 ): Promise<{ ok: boolean; error?: string }> {
   const inviteUrlRe = /custom-invite|invite-connect|invite-send|mynetwork\/invite|\/invite\//i;
 
+  const inviteLikeText = (txt: string) =>
+    /invitación|invitation|nota|note|añadir|add a note|conectar|connect|personaliz|personalize|sin nota|without a note/i.test(
+      txt
+    );
+
   const hasInviteSurface = async (): Promise<boolean> => {
     if (inviteUrlRe.test(page.url())) return true;
-    if (await page.locator('[role="dialog"]').first().isVisible({ timeout: 700 }).catch(() => false)) {
-      return true;
+
+    const dlg = page.locator('[role="dialog"]');
+    const dn = await dlg.count().catch(() => 0);
+    for (let i = 0; i < Math.min(dn, 8); i++) {
+      if (!(await dlg.nth(i).isVisible({ timeout: 500 }).catch(() => false))) continue;
+      const txt = ((await dlg.nth(i).innerText().catch(() => "")) || "").toLowerCase();
+      if (inviteLikeText(txt)) return true;
     }
+
     const modals = page.locator(".artdeco-modal, [data-test-modal-container]");
     const n = await modals.count().catch(() => 0);
-    for (let i = 0; i < Math.min(n, 5); i++) {
+    for (let i = 0; i < Math.min(n, 8); i++) {
       if (!(await modals.nth(i).isVisible({ timeout: 400 }).catch(() => false))) continue;
-      const txt = (await modals.nth(i).innerText().catch(() => "")) || "";
-      if (/invitación|invitation|nota|note|añadir|add a note|conectar|connect/i.test(txt)) return true;
+      const txt = ((await modals.nth(i).innerText().catch(() => "")) || "").toLowerCase();
+      if (inviteLikeText(txt)) return true;
     }
     return false;
   };
 
+  /** Solo señales claras en la zona del top card — nunca todo el texto de main (falsos positivos con el feed). */
   const showsPendingOnProfile = async (): Promise<boolean> => {
     const inMain = page.locator("main");
-    if (
-      await inMain
-        .getByRole("button", {
-          name: /retirar invitación|withdraw invitation|pendiente|pending/i,
+    const topScope = inMain.locator(
+      "[class*='pvs-profile-actions'], [data-view-name*='profile-top-card'], .pv-top-card--list, header"
+    );
+
+    const isNearProfileHeader = async (loc: Locator): Promise<boolean> => {
+      return loc
+        .first()
+        .evaluate((el) => {
+          const r = (el as HTMLElement).getBoundingClientRect();
+          return r.width > 2 && r.height > 2 && r.top >= 0 && r.top < window.innerHeight * 0.55;
         })
-        .first()
-        .isVisible({ timeout: 700 })
-        .catch(() => false)
-    ) {
-      return true;
-    }
-    if (
-      await inMain
-        .getByText(/invitación enviada|invitation sent|solicitud enviada|invitation pending/i)
-        .first()
-        .isVisible({ timeout: 700 })
-        .catch(() => false)
-    ) {
-      return true;
-    }
-    return page.evaluate(() => {
-      const m = document.querySelector("main");
-      if (!m) return false;
-      const t = (m.innerText || "").toLowerCase();
-      return /pendiente|pending|invitación enviada|invitation sent|withdraw invitation|retirar invitación/.test(
-        t
-      );
+        .catch(() => false);
+    };
+
+    const withdraw = inMain.getByRole("button", {
+      name: /retirar invitación|withdraw invitation|withdraw your invitation|cancel invitation|cancelar invitación/i,
     });
+    if ((await withdraw.first().isVisible({ timeout: 600 }).catch(() => false)) && (await isNearProfileHeader(withdraw))) {
+      return true;
+    }
+
+    const pendingCompact = inMain.getByRole("button", { name: /^(Pendiente|Pending)$/i });
+    if (
+      (await pendingCompact.first().isVisible({ timeout: 600 }).catch(() => false)) &&
+      (await isNearProfileHeader(pendingCompact))
+    ) {
+      return true;
+    }
+
+    const sentScoped = topScope.getByText(
+      /invitación enviada|invitation sent|solicitud enviada|invitation pending|invitación pendiente/i
+    );
+    if (await sentScoped.first().isVisible({ timeout: 600 }).catch(() => false)) return true;
+
+    return false;
   };
 
   const deadline = Date.now() + 24000;
@@ -1408,9 +1427,13 @@ async function completeLinkedInInviteAfterConnectClick(
     }
 
     const scopes: Locator[] = [];
-    const dlg = page.locator('[role="dialog"]');
-    if (await dlg.first().isVisible({ timeout: 2500 }).catch(() => false)) {
-      scopes.push(dlg.first());
+    const dlgAll = page.locator('[role="dialog"]');
+    const dnc = await dlgAll.count().catch(() => 0);
+    for (let di = 0; di < Math.min(dnc, 8); di++) {
+      const d = dlgAll.nth(di);
+      if (!(await d.isVisible({ timeout: 400 }).catch(() => false))) continue;
+      const dtxt = ((await d.innerText().catch(() => "")) || "").toLowerCase();
+      if (inviteLikeText(dtxt)) scopes.push(d);
     }
 
     const modalShells = page.locator(
@@ -1477,11 +1500,7 @@ async function completeLinkedInInviteAfterConnectClick(
           if (modalTextLooksLikeInvite(el)) roots.push(el);
         }
       }
-      if (roots.length === 0) {
-        const d = document.querySelector('[role="dialog"]');
-        if (d && (d as HTMLElement).offsetParent) roots.push(d);
-      }
-      if (roots.length === 0) roots.push(document.body);
+      if (roots.length === 0) return false;
 
       const tryButtonsIn = (root: Element): boolean => {
         const nodes = root.querySelectorAll("button, [role='button'], a[role='button']");
@@ -1532,7 +1551,15 @@ async function completeLinkedInInviteAfterConnectClick(
   const sent = await trySendClick();
   if (!sent) return { ok: false, error: "connect_send_button_missing" };
 
-  await randomDelay(2000, 5000);
+  await randomDelay(1500, 3200);
+  const verifyDeadline = Date.now() + 14000;
+  while (Date.now() < verifyDeadline) {
+    if (await showsPendingOnProfile()) return { ok: true };
+    if (!(await hasInviteSurface())) return { ok: true };
+    await randomDelay(450, 800);
+  }
+  if (await showsPendingOnProfile()) return { ok: true };
+  if (await hasInviteSurface()) return { ok: false, error: "connect_send_not_confirmed" };
   return { ok: true };
 }
 
