@@ -175,18 +175,40 @@ export async function registerApiRoutes(app: FastifyInstance) {
     const heartbeatMs = await getWorkerHeartbeatTimestampMs(redis);
     const workerHeartbeatAgeSec =
       heartbeatMs !== null ? Math.max(0, Math.round((Date.now() - heartbeatMs) / 1000)) : null;
-    const workerSeemsRunning = heartbeatMs !== null && Date.now() - heartbeatMs < 90_000;
+    const workerSeemsRunningByHb = heartbeatMs !== null && Date.now() - heartbeatMs < 90_000;
 
-    if (pending_due_now > 0 && !workerSeemsRunning) {
-      if (isMemoryRedis(redis)) {
-        warnings.push(
-          "Hay tareas pendientes ya listas (hora programada ≤ ahora) pero la cola está en memoria: el API y el worker son procesos distintos. Arranca el worker (`npm run dev:worker` desde la raíz) o todo junto con `npm run dev`. Solo `npm run dev:frontend` no ejecuta tareas."
-        );
-      } else {
-        warnings.push(
-          "Hay tareas listas para ejecutar pero no hay latido del worker en Redis (<90s). Arranca `npm run dev:worker` desde la raíz o revisa REDIS_URL y que el worker esté en ejecución."
-        );
-      }
+    // Fallback: si el heartbeat no llega (procesos separados sin Redis compartido),
+    // detectar actividad del worker mirando tareas running/completed recientes en la BD.
+    let workerSeemsRunning = workerSeemsRunningByHb;
+    if (!workerSeemsRunning && accountIds.length) {
+      const recentCutoff = new Date(Date.now() - 3 * 60_000).toISOString();
+      const { count: recentActivity } = await sb
+        .from("tasks")
+        .select("id", { count: "exact", head: true })
+        .in("account_id", accountIds)
+        .in("status", ["running", "completed"])
+        .gte("created_at", recentCutoff);
+      if ((recentActivity ?? 0) > 0) workerSeemsRunning = true;
+    }
+
+    // Solo alertar si hay tareas pendientes que llevan más de 3 min sin procesarse
+    // (las recién creadas aún no han tenido tiempo de ejecutarse).
+    let oldPendingDue = 0;
+    if (pending_due_now > 0 && accountIds.length) {
+      const oldCutoff = new Date(Date.now() - 3 * 60_000).toISOString();
+      const { count } = await sb
+        .from("tasks")
+        .select("id", { count: "exact", head: true })
+        .in("account_id", accountIds)
+        .eq("status", "pending")
+        .lte("scheduled_at", oldCutoff);
+      oldPendingDue = count ?? 0;
+    }
+
+    if (oldPendingDue > 0 && !workerSeemsRunning) {
+      warnings.push(
+        "Hay tareas pendientes sin procesar hace más de 3 min. Verifica que el worker esté en ejecución."
+      );
     }
 
     let recentTasks: unknown[] = [];
