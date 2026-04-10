@@ -2254,7 +2254,10 @@ const LINKEDIN_AUTOMATION_ACTIONS = new Set([
 
 export async function runOneTask(sb: SupabaseClient, redis: RedisClient, taskId: string): Promise<void> {
   const task = await claimTask(sb, taskId);
-  if (!task) return;
+  if (!task) {
+    console.log(`[worker] claimTask(${taskId.slice(0, 8)}) → null (tarea ya no está pending o no existe)`);
+    return;
+  }
   await removeTaskFromDue(redis, taskId).catch(() => {});
 
   const action = task.action as string;
@@ -2300,6 +2303,7 @@ export async function runOneTask(sb: SupabaseClient, redis: RedisClient, taskId:
       .eq("id", taskId);
 
     await enqueueTaskDue(redis, taskId, next);
+    console.log(`[worker] Tarea ${taskId.slice(0, 8)} (${action}) cuenta pausada hasta ${account.paused_until} — reprogramada.`);
     return;
   }
 
@@ -2338,6 +2342,7 @@ export async function runOneTask(sb: SupabaseClient, redis: RedisClient, taskId:
         error_message: "account_cooldown",
       }).eq("id", taskId);
       await enqueueTaskDue(redis, taskId, nextMs);
+      console.log(`[worker] Tarea ${taskId.slice(0, 8)} (${action}) en cooldown ${cooldownSec}s — reprogramada.`);
       return;
     }
   }
@@ -2397,6 +2402,7 @@ export async function runOneTask(sb: SupabaseClient, redis: RedisClient, taskId:
     // Bypass: intentar adquirir slot normal; si está lleno, continuar de todas formas sin tocar el contador.
     acquiredSlot = await acquireBrowserSlot(redis).catch(() => false);
     gotSlot = true; // siempre procede independientemente del contador
+    console.log(`[worker] ${taskId.slice(0, 8)} (${action}) slot bypass — acquired=${acquiredSlot} gotSlot=true`);
   } else {
     try {
       gotSlot = await acquireBrowserSlot(redis);
@@ -2404,6 +2410,7 @@ export async function runOneTask(sb: SupabaseClient, redis: RedisClient, taskId:
     } catch (slotErr) {
       console.error(`[worker] acquireBrowserSlot error (${taskId.slice(0, 8)}):`, slotErr instanceof Error ? slotErr.message : slotErr);
     }
+    console.log(`[worker] ${taskId.slice(0, 8)} (${action}) slot → gotSlot=${gotSlot}`);
   }
   if (!gotSlot) {
     // Esperar más tiempo si es tarea de campaña para no ciclar cada 15s
@@ -2421,6 +2428,7 @@ export async function runOneTask(sb: SupabaseClient, redis: RedisClient, taskId:
       .eq("id", taskId)
       .then(undefined, (e: unknown) => console.error("[worker] reschedule no-slot:", e));
     await enqueueTaskDue(redis, taskId, Date.now() + waitMs).catch(() => {});
+    console.log(`[worker] Tarea ${taskId.slice(0, 8)} (${action}) sin slot — reprogramada en ${waitMs / 1000}s`);
     return;
   }
 
@@ -2430,6 +2438,7 @@ export async function runOneTask(sb: SupabaseClient, redis: RedisClient, taskId:
   try {
     let proxyId = account.proxy_id as string | null;
     let proxyRow = proxyId ? await loadProxy(sb, proxyId) : null;
+    console.log(`[worker] ${taskId.slice(0, 8)} (${action}) proxy_id=${proxyId ?? "null"} proxyRow=${proxyRow ? proxyRow.host : "null"}`);
 
     if (!proxyRow) {
       // Intenta asignar un proxy libre del pool del usuario
@@ -2438,6 +2447,7 @@ export async function runOneTask(sb: SupabaseClient, redis: RedisClient, taskId:
         proxyId = newPid;
         proxyRow = await loadProxy(sb, newPid);
       }
+      console.log(`[worker] ${taskId.slice(0, 8)} (${action}) pickProxy → proxyId=${proxyId ?? "null"} host=${proxyRow?.host ?? "null"}`);
     }
 
     const proxy =
@@ -2454,7 +2464,7 @@ export async function runOneTask(sb: SupabaseClient, redis: RedisClient, taskId:
       const reschedAt = new Date(Date.now() + 5 * 60_000).toISOString();
       await sb.from("tasks").update({ status: "pending", scheduled_at: reschedAt, error_message: "no_proxy_available", attempts: Math.max(0, (task.attempts as number) - 1) }).eq("id", taskId);
       await enqueueTaskDue(redis, taskId, Date.now() + 5 * 60_000).catch(() => {});
-      console.warn(`[worker] Tarea ${taskId.slice(0, 8)} sin proxy — reprogramada en 5 min (REQUIRE_PROXY=true)`);
+      console.warn(`[worker] Tarea ${taskId.slice(0, 8)} (${action}) sin proxy — reprogramada en 5 min (REQUIRE_PROXY=true). account.proxy_id=${account.proxy_id ?? "null"}`);
       return;
     }
 
@@ -3762,6 +3772,11 @@ export async function processDueTasks(sb: SupabaseClient, redis: RedisClient): P
   }
 
   if (batch.length) {
+    const batchDesc = batch.map((id) => {
+      const m = metaList.find((x) => x.id === id);
+      return m ? `${id.slice(0, 8)}:${m.action}` : id.slice(0, 8);
+    });
+    console.log(`[worker] batch [${batchDesc.join(", ")}]`);
     await Promise.all(
       batch.map((taskId) =>
         runOneTask(sb, redis, taskId).catch((e: unknown) => {
