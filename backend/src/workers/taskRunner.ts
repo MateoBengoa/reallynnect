@@ -1088,6 +1088,38 @@ async function extractAllThreadBubblesFromDom(page: Page): Promise<
 
 type DmRuleRow = { id: string; keyword: string; reply_template: string | null; use_ai: boolean };
 
+/**
+ * Parsea la respuesta Voyager de eventos de hilo y devuelve un mapa eventUrn→isoTimestamp.
+ * Soporta el formato normalizado de LinkedIn (elements[] con createdAt en ms).
+ */
+function parseVoyagerThreadEvents(body: unknown): Map<string, string> {
+  const map = new Map<string, string>();
+  if (!body || typeof body !== "object") return map;
+  const b = body as Record<string, unknown>;
+
+  // Formatos observados: { elements: [...] } o { data: { elements: [...] } }
+  const elements =
+    (Array.isArray(b.elements) ? b.elements : null) ??
+    (b.data && typeof b.data === "object" && Array.isArray((b.data as Record<string,unknown>).elements)
+      ? (b.data as Record<string,unknown>).elements as unknown[]
+      : null) ??
+    [];
+
+  for (const el of elements) {
+    if (!el || typeof el !== "object") continue;
+    const ev = el as Record<string, unknown>;
+    const urn: string | null =
+      (typeof ev.entityUrn === "string" ? ev.entityUrn : null) ??
+      (typeof ev["*message"] === "string" ? ev["*message"] : null);
+    const createdAt: number | null =
+      typeof ev.createdAt === "number" ? ev.createdAt : null;
+    if (urn && createdAt && createdAt > 0) {
+      map.set(urn, new Date(createdAt).toISOString());
+    }
+  }
+  return map;
+}
+
 async function runMessagingThreadSync(
   page: Page,
   sb: SupabaseClient,
@@ -1097,6 +1129,24 @@ async function runMessagingThreadSync(
   opts: { keywordsAutoReply: boolean }
 ): Promise<void> {
   const url = `https://www.linkedin.com/messaging/thread/${encodeURIComponent(conversationId)}/`;
+
+  // ── Interceptar respuestas Voyager para capturar timestamps reales ────────────
+  // LinkedIn hace XHR a /voyager/api/messaging/conversations/{id}/events cuando carga el hilo.
+  // Capturamos el JSON para obtener createdAt exacto de cada mensaje.
+  const voyagerTsMap = new Map<string, string>(); // eventUrn → ISO timestamp
+  const onResponse = async (response: import("playwright").Response) => {
+    try {
+      const u = response.url();
+      if (!u.includes("/voyager/api/messaging/conversations/") || !u.includes("/events")) return;
+      if (!response.ok()) return;
+      const json = await response.json().catch(() => null);
+      const parsed = parseVoyagerThreadEvents(json);
+      for (const [urn, iso] of parsed) voyagerTsMap.set(urn, iso);
+      if (parsed.size > 0) console.log(`[inbox_thread_sync] voyager_events intercepted: ${parsed.size} ts`);
+    } catch { /* ignorar errores de parseo */ }
+  };
+  page.on("response", onResponse);
+
   // 'load' espera el JS inicial; los mensajes se cargan después con XHR
   await page.goto(url, { waitUntil: "load", timeout: 55_000 }).catch(() =>
     page.goto(url, { waitUntil: "domcontentloaded", timeout: 55_000 })
@@ -1124,44 +1174,24 @@ async function runMessagingThreadSync(
   await new Promise((r) => setTimeout(r, 800));
   await scrollThreadMessageListLoadOlder(page);
   await new Promise((r) => setTimeout(r, inboxEnvInt("INBOX_THREAD_DOM_SETTLE_MS", 1500)));
+
+  page.off("response", onResponse);
+
   let bubbles = await extractAllThreadBubblesFromDom(page);
-  // Diagnóstico de timestamps — siempre loguear para poder depurar
-  const tsDbg = await page.evaluate(`(function() {
-    var liCount = document.querySelectorAll("li.msg-s-message-list__event").length;
-    var headings = Array.prototype.slice.call(document.querySelectorAll("time.msg-s-message-list__time-heading")).map(function(el){ return el.textContent.trim(); }).slice(0,3);
-    var groupTs = Array.prototype.slice.call(document.querySelectorAll("time.msg-s-message-group__timestamp")).map(function(el){ return el.textContent.trim(); }).slice(0,3);
-    var urns = document.querySelectorAll("[data-event-urn]").length;
-    return { liCount: liCount, headings: headings, groupTs: groupTs, urns: urns };
-  })()`).catch(() => null);
-  const withTs = bubbles.filter((b) => b.isoTimestamp).length;
-  console.log(`[inbox_thread_sync] thread=${conversationId.slice(0, 14)}… burbujas_intento1=${bubbles.length} withTs=${withTs}/${bubbles.length}`, JSON.stringify(tsDbg));
+
+  // Enriquecer burbujas con timestamps de la API Voyager interceptada
+  if (voyagerTsMap.size > 0) {
+    bubbles = bubbles.map((b) => {
+      if (b.isoTimestamp) return b; // ya tiene ts del DOM
+      if (b.eventUrn && voyagerTsMap.has(b.eventUrn)) {
+        return { ...b, isoTimestamp: voyagerTsMap.get(b.eventUrn) };
+      }
+      return b;
+    });
+    console.log(`[inbox_thread_sync] voyager_ts aplicados: ${bubbles.filter(b=>b.isoTimestamp).length}/${bubbles.length}`);
+  }
+
   if (bubbles.length < 2) {
-    // Diagnóstico: listar qué contenedores y elementos existen en el DOM del hilo
-    const dbgInfo = await page.evaluate(`(function() {
-      var candidates = [
-        ".msg-s-message-list-container", ".msg-s-message-list", ".msg-thread",
-        "[data-view-name='message-thread-scroll-container']", "[data-view-name='message-pane']",
-        ".scaffold-layout__detail", "main"
-      ];
-      var found = [];
-      for (var i = 0; i < candidates.length; i++) {
-        var el = document.querySelector(candidates[i]);
-        if (el) {
-          var li = el.querySelectorAll("li").length;
-          var art = el.querySelectorAll("article").length;
-          var p = el.querySelectorAll("p").length;
-          found.push(candidates[i] + "(li=" + li + ",art=" + art + ",p=" + p + ")");
-        }
-      }
-      var msgSItems = document.querySelectorAll("[class*='msg-s']");
-      var msgClasses = [];
-      for (var mi = 0; mi < Math.min(5, msgSItems.length); mi++) {
-        var cn = msgSItems[mi].className;
-        msgClasses.push(typeof cn === "string" ? cn.split(" ")[0] : "?");
-      }
-      return "url=" + window.location.href.slice(-40) + " | found=" + found.join(";") + " | msg-s-classes=" + msgClasses.join(",");
-    })()`).catch(() => "eval-err");
-    console.log("[inbox_thread_sync] DOM diagnóstico:", dbgInfo);
     await new Promise((r) => setTimeout(r, 1500));
     bubbles = await extractAllThreadBubblesFromDom(page);
     console.log(`[inbox_thread_sync] thread=${conversationId.slice(0, 14)}… burbujas_intento2=${bubbles.length}`);

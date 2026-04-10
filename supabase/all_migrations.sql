@@ -648,6 +648,12 @@ create unique index if not exists idx_messages_event_urn
   on public.messages (account_id, event_urn)
   where event_urn is not null;
 
+-- ─── 020_reset_message_timestamps.sql ───────────────────────────────────────
+-- Limpia todos los mensajes para que el próximo sync re-inserte con
+-- timestamps reales capturados desde la API Voyager de LinkedIn.
+-- Ejecutar una sola vez en el SQL Editor de Supabase.
+delete from public.messages;
+
 -- =============================================================================
 -- Fin. Activa Email en Auth y configura SUPABASE_* en backend + frontend.
 -- =============================================================================
