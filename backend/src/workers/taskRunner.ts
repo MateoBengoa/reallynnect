@@ -2255,7 +2255,10 @@ const LINKEDIN_AUTOMATION_ACTIONS = new Set([
 export async function runOneTask(sb: SupabaseClient, redis: RedisClient, taskId: string): Promise<void> {
   const task = await claimTask(sb, taskId);
   if (!task) {
-    console.log(`[worker] claimTask(${taskId.slice(0, 8)}) → null (tarea ya no está pending o no existe)`);
+    // La tarea ya no existe o no está pending (fue cancelada, completada, etc.).
+    // Limpiar la entrada del ZSET para no volver a procesarla en cada ciclo.
+    await removeTaskFromDue(redis, taskId).catch(() => {});
+    console.log(`[worker] claimTask(${taskId.slice(0, 8)}) → null — eliminada del ZSET`);
     return;
   }
   await removeTaskFromDue(redis, taskId).catch(() => {});
@@ -3729,10 +3732,15 @@ export async function processDueTasks(sb: SupabaseClient, redis: RedisClient): P
     if (ga !== gb) return ga - gb;
     return new Date(a.scheduled_at).getTime() - new Date(b.scheduled_at).getTime();
   });
-  const orderedIds: string[] = metaList.map((r) => r.id);
-  for (const id of unique) {
-    if (!orderedIds.includes(id)) orderedIds.push(id);
+  // Solo procesar IDs confirmados como pending en la BD.
+  // IDs del ZSET que ya no existen/no están pending se limpian del ZSET para no repetirse.
+  const pendingIdSet = new Set(metaList.map((r) => r.id));
+  const ghostZsetIds = zids.filter((id) => !pendingIdSet.has(id));
+  if (ghostZsetIds.length > 0) {
+    console.log(`[worker] Limpiando ${ghostZsetIds.length} entrada(s) fantasma del ZSET: ${ghostZsetIds.map((id) => id.slice(0, 8)).join(", ")}`);
+    await Promise.all(ghostZsetIds.map((id) => removeTaskFromDue(redis, id).catch(() => {})));
   }
+  const orderedIds: string[] = metaList.map((r) => r.id);
 
   const parallelRaw = Number(process.env.WORKER_MAX_PARALLEL ?? MAX_BROWSERS);
   const maxParallel = Math.min(
