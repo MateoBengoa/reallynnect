@@ -23,7 +23,7 @@ export function LeadsDataTable({ rows, onRowClick, showCrmColumn }: LeadsDataTab
     <div className="card overflow-hidden">
       <div className="overflow-x-auto">
         <table className="w-full min-w-[720px] text-left text-sm">
-          <thead className="sticky top-0 z-10 border-b border-[var(--border)] bg-[color-mix(in_srgb,var(--surface)_96%,var(--bg))] backdrop-blur-sm">
+          <thead className="sticky top-0 z-10 border-b border-[var(--border)] bg-[color-mix(in_srgb,var(--surface)_96%,transparent)] backdrop-blur-sm">
             <tr className="text-[11px] font-semibold uppercase tracking-wider text-[var(--muted)]">
               <th className="w-12 px-4 py-3.5" aria-hidden />
               <th className="px-3 py-3.5 font-medium">Nombre</th>
@@ -38,7 +38,7 @@ export function LeadsDataTable({ rows, onRowClick, showCrmColumn }: LeadsDataTab
             {rows.map(({ lead, enrollment }) => (
               <tr
                 key={enrollment?.id ?? lead.id}
-                className="cursor-pointer border-b border-[var(--border)] transition-colors last:border-0 hover:bg-[color-mix(in_srgb,var(--text)_4%,var(--surface))]"
+                className="cursor-pointer border-b border-[var(--border)] transition-colors last:border-0 hover:bg-[color-mix(in_srgb,var(--text)_4%,transparent)]"
                 onClick={() => onRowClick(lead, enrollment)}
               >
                 <td className="px-4 py-3">

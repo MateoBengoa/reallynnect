@@ -110,7 +110,7 @@ export default function ContentEventsPage() {
       {loading ? (
         <p className="text-sm text-[var(--muted)]">Cargando…</p>
       ) : events.length === 0 ? (
-        <div className="rounded-[var(--radius-lg)] border border-[var(--border)] bg-[var(--surface)] px-6 py-10 text-center">
+        <div className="rounded-[var(--radius-lg)] border border-[var(--border)] bg-[color-mix(in_srgb,var(--surface)_32%,transparent)] px-6 py-10 text-center">
           <p className="text-sm font-medium text-[var(--text)]">Sin eventos todavía</p>
           <p className="mt-1 text-xs text-[var(--muted)]">
             Los eventos aparecen cuando el worker ejecuta <code className="text-[var(--text)]">poll_comments</code>.
@@ -121,7 +121,7 @@ export default function ContentEventsPage() {
         <div className="overflow-x-auto rounded-[var(--radius-lg)] border border-[var(--border)]">
           <table className="w-full text-xs">
             <thead>
-              <tr className="border-b border-[var(--border)] bg-[color-mix(in_srgb,var(--text)_4%,var(--surface))]">
+              <tr className="border-b border-[var(--border)] bg-[color-mix(in_srgb,var(--text)_4%,transparent)]">
                 <th className="px-3 py-2 text-left font-semibold text-[var(--muted)]">Tipo</th>
                 <th className="px-3 py-2 text-left font-semibold text-[var(--muted)]">Detalle</th>
                 <th className="px-3 py-2 text-left font-semibold text-[var(--muted)]">Regla</th>
@@ -140,7 +140,7 @@ export default function ContentEventsPage() {
                 return (
                   <tr
                     key={e.id}
-                    className="border-b border-[var(--border)]/50 bg-[var(--surface)] transition-colors hover:bg-[color-mix(in_srgb,var(--text)_3%,var(--surface))]"
+                    className="border-b border-[var(--border)]/50 bg-[color-mix(in_srgb,var(--surface)_32%,transparent)] transition-colors hover:bg-[color-mix(in_srgb,var(--text)_3%,transparent)]"
                   >
                     <td className="px-3 py-2">
                       <span className={`inline-flex items-center rounded border px-1.5 py-0.5 font-mono text-[10px] font-semibold ${style}`}>

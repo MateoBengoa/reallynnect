@@ -189,7 +189,7 @@ export default function ProxiesPage() {
                     <span className="text-xs text-[var(--muted)]">{p.username}</span>
                   )}
                   {p.webshare_proxy_id && (
-                    <span className="font-mono text-[10px] text-[color-mix(in_srgb,var(--text)_30%,var(--surface))]">
+                    <span className="font-mono text-[10px] text-[color-mix(in_srgb,var(--text)_30%,transparent)]">
                       webshare:{p.webshare_proxy_id.slice(0, 12)}…
                     </span>
                   )}

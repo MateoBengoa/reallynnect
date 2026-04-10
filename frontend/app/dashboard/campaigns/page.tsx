@@ -8,15 +8,15 @@ import { api } from "@/lib/api";
 type Campaign = { id: string; name: string; status: string };
 
 const STATUS_META: Record<string, { label: string; cls: string }> = {
-  active:   { label: "Activa",    cls: "border-[color-mix(in_srgb,var(--accent)_45%,var(--border))] bg-[color-mix(in_srgb,var(--accent)_14%,var(--surface))] text-[var(--accent)]" },
-  paused:   { label: "Pausada",   cls: "border-[color-mix(in_srgb,#f59e0b_40%,var(--border))] bg-[color-mix(in_srgb,#f59e0b_12%,var(--surface))] text-amber-400" },
-  draft:    { label: "Borrador",  cls: "border-[color-mix(in_srgb,var(--muted)_40%,var(--border))] bg-[color-mix(in_srgb,var(--text)_8%,var(--surface))] text-[var(--muted)]" },
-  completed:{ label: "Completa",  cls: "border-[color-mix(in_srgb,#22c55e_40%,var(--border))] bg-[color-mix(in_srgb,#22c55e_12%,var(--surface))] text-[#86efac]" },
-  archived: { label: "Archivada", cls: "border-[color-mix(in_srgb,var(--muted)_30%,var(--border))] bg-[color-mix(in_srgb,var(--text)_5%,var(--surface))] text-[var(--muted)]" },
+  active:   { label: "Activa",    cls: "border-[color-mix(in_srgb,var(--accent)_45%,var(--border))] bg-[color-mix(in_srgb,var(--accent)_14%,transparent)] text-[var(--accent)]" },
+  paused:   { label: "Pausada",   cls: "border-[color-mix(in_srgb,#f59e0b_40%,var(--border))] bg-[color-mix(in_srgb,#f59e0b_12%,transparent)] text-amber-400" },
+  draft:    { label: "Borrador",  cls: "border-[color-mix(in_srgb,var(--muted)_40%,var(--border))] bg-[color-mix(in_srgb,var(--text)_8%,transparent)] text-[var(--muted)]" },
+  completed:{ label: "Completa",  cls: "border-[color-mix(in_srgb,#22c55e_40%,var(--border))] bg-[color-mix(in_srgb,#22c55e_12%,transparent)] text-[#86efac]" },
+  archived: { label: "Archivada", cls: "border-[color-mix(in_srgb,var(--muted)_30%,var(--border))] bg-[color-mix(in_srgb,var(--text)_5%,transparent)] text-[var(--muted)]" },
 };
 
 function StatusBadge({ status }: { status: string }) {
-  const m = STATUS_META[status] ?? { label: status, cls: "border-[var(--border)] bg-[color-mix(in_srgb,var(--text)_6%,var(--surface))] text-[var(--muted)]" };
+  const m = STATUS_META[status] ?? { label: status, cls: "border-[var(--border)] bg-[color-mix(in_srgb,var(--text)_6%,transparent)] text-[var(--muted)]" };
   return (
     <span className={`shrink-0 rounded-full border px-2.5 py-0.5 text-[11px] font-semibold uppercase tracking-wide ${m.cls}`}>
       {m.label}
@@ -27,7 +27,7 @@ function StatusBadge({ status }: { status: string }) {
 function CampaignInitial({ name }: { name: string }) {
   const initial = (name ?? "C").charAt(0).toUpperCase();
   return (
-    <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-[color-mix(in_srgb,var(--accent)_18%,var(--surface))] text-base font-bold text-[var(--accent)] ring-1 ring-[var(--border)]">
+    <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-[color-mix(in_srgb,var(--accent)_18%,transparent)] text-base font-bold text-[var(--accent)] ring-1 ring-[var(--border)]">
       {initial}
     </div>
   );
@@ -89,7 +89,7 @@ export default function CampaignsPage() {
           onClick={openWizard}
           className="group flex min-h-[12rem] flex-col items-center justify-center gap-3 rounded-[var(--radius-lg)] border-2 border-dashed border-[color-mix(in_srgb,var(--muted)_38%,var(--border))] bg-[color-mix(in_srgb,var(--accent)_5%,transparent)] px-4 py-8 text-center transition-[border-color,background-color] hover:border-[color-mix(in_srgb,var(--accent)_55%,var(--border))] hover:bg-[color-mix(in_srgb,var(--accent)_10%,transparent)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]/40"
         >
-          <span className="flex h-12 w-12 items-center justify-center rounded-full border border-[color-mix(in_srgb,var(--accent)_35%,var(--border))] bg-[color-mix(in_srgb,var(--accent)_14%,var(--surface))] text-[var(--accent)] transition-transform group-hover:scale-105" aria-hidden>
+          <span className="flex h-12 w-12 items-center justify-center rounded-full border border-[color-mix(in_srgb,var(--accent)_35%,var(--border))] bg-[color-mix(in_srgb,var(--accent)_14%,transparent)] text-[var(--accent)] transition-transform group-hover:scale-105" aria-hidden>
             <svg className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
               <path strokeLinecap="round" strokeLinejoin="round" d="M12 4v16m8-8H4" />
             </svg>
@@ -146,7 +146,7 @@ export default function CampaignsPage() {
         >
           <div className="popover-panel flex w-full max-w-md flex-col overflow-hidden shadow-[var(--shadow-md)]">
             {/* Header */}
-            <div className="border-b border-[var(--border)] bg-[color-mix(in_srgb,var(--accent)_6%,var(--surface))] px-5 py-4">
+            <div className="border-b border-[var(--border)] bg-[color-mix(in_srgb,var(--accent)_6%,transparent)] px-5 py-4">
               <div className="flex items-center justify-between gap-2">
                 <div>
                   <p className="text-[11px] font-semibold uppercase tracking-wide text-[var(--muted)]">Nueva campaña</p>
@@ -159,7 +159,7 @@ export default function CampaignsPage() {
             {/* Body */}
             <div className="px-5 py-5">
               {error && (
-                <p className="mb-4 rounded-md border border-[color-mix(in_srgb,#f87171_40%,var(--border))] bg-[color-mix(in_srgb,#ef4444_10%,var(--surface))] px-3 py-2 text-sm text-[#fca5a5]">
+                <p className="mb-4 rounded-md border border-[color-mix(in_srgb,#f87171_40%,var(--border))] bg-[color-mix(in_srgb,#ef4444_10%,transparent)] px-3 py-2 text-sm text-[#fca5a5]">
                   {error}
                 </p>
               )}
@@ -179,7 +179,7 @@ export default function CampaignsPage() {
             </div>
 
             {/* Footer */}
-            <div className="flex items-center justify-end gap-2 border-t border-[var(--border)] bg-[color-mix(in_srgb,var(--text)_2%,var(--surface))] px-5 py-3">
+            <div className="flex items-center justify-end gap-2 border-t border-[var(--border)] bg-[color-mix(in_srgb,var(--text)_2%,transparent)] px-5 py-3">
               <button type="button" className="btn-secondary min-h-10" onClick={closeWizard}>Cancelar</button>
               <button type="button" className="btn-primary min-h-10" onClick={() => void create()} disabled={saving}>
                 {saving ? "Creando…" : "Crear campaña"}

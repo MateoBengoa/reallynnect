@@ -78,7 +78,7 @@ Automatizar LinkedIn puede **vulnerar los términos de servicio** de LinkedIn y 
 | `automation_tasks:due` | Cola ordenada por tiempo (ZSET) de ids de tarea |
 | `browser:active_count` | Semáforo: máximo 4 navegadores Chromium a la vez |
 | Claves `limit:visit:…`, `limit:connect:…`, `limit:message:…` (por cuenta y día UTC) | Contadores diarios |
-| `sched:poll_messages:{accountId}` / `sched:poll_comments:...` | Evita spamear tareas de sondeo |
+| `sched:keyword_polls:{accountId}` | Evita spamear `poll_comments` programado |
 
 ### 2.3 Proxies residenciales (Webshare u otro)
 
@@ -238,7 +238,7 @@ Entra en `http://localhost:3030`, regístrate o inicia sesión.
 ### 5.6 Reglas por palabras clave
 
 - **Keywords:** palabra, plantilla (usa `{name}` si quieres), tipo **DM** o **comentario**, opción **Gemini** para respuesta automática.
-- El **scheduler** encola `poll_messages` / `poll_comments` con cadencia controlada (Redis + comprobación de tareas pendientes).
+- El **scheduler** encola `poll_comments` con cadencia controlada (Redis + comprobación de tareas pendientes). La lista de mensajes se actualiza al abrir **Inbox** (`sync_inbox`).
 
 ### 5.7 Tareas
 

@@ -114,8 +114,8 @@ export function PostRulePicker({ posts, value, onChange }: PostRulePickerProps) 
                 onClick={() => pick("")}
                 className={`w-full rounded-[var(--radius-md)] border px-3 py-2.5 text-left text-sm transition-colors ${
                   value === ""
-                    ? "border-[color-mix(in_srgb,var(--accent)_45%,var(--border))] bg-[color-mix(in_srgb,var(--accent)_12%,var(--surface))]"
-                    : "border-transparent hover:bg-[color-mix(in_srgb,var(--text)_5%,var(--surface))]"
+                    ? "border-[color-mix(in_srgb,var(--accent)_45%,var(--border))] bg-[color-mix(in_srgb,var(--accent)_12%,transparent)]"
+                    : "border-transparent hover:bg-[color-mix(in_srgb,var(--text)_5%,transparent)]"
                 }`}
               >
                 <span className="font-medium text-[var(--text)]">Cualquier post</span>
@@ -133,8 +133,8 @@ export function PostRulePicker({ posts, value, onChange }: PostRulePickerProps) 
                     onClick={() => pick(p.id)}
                     className={`w-full rounded-[var(--radius-md)] border px-3 py-2.5 text-left text-sm transition-colors ${
                       active
-                        ? "border-[color-mix(in_srgb,var(--accent)_45%,var(--border))] bg-[color-mix(in_srgb,var(--accent)_12%,var(--surface))]"
-                        : "border-transparent hover:bg-[color-mix(in_srgb,var(--text)_5%,var(--surface))]"
+                        ? "border-[color-mix(in_srgb,var(--accent)_45%,var(--border))] bg-[color-mix(in_srgb,var(--accent)_12%,transparent)]"
+                        : "border-transparent hover:bg-[color-mix(in_srgb,var(--text)_5%,transparent)]"
                     }`}
                   >
                     <span className="inline-flex rounded-full border border-[var(--border)] px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-[var(--muted)]">

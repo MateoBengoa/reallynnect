@@ -18,7 +18,7 @@ const CampaignWorkflowEditor = dynamic(
   () => import("@/components/CampaignWorkflowEditor").then((m) => ({ default: m.CampaignWorkflowEditor })),
   {
     ssr: false,
-    loading: () => <div className="card min-h-[360px] animate-pulse card-pad bg-[color-mix(in_srgb,var(--text)_4%,var(--surface))]" aria-hidden />,
+    loading: () => <div className="card min-h-[360px] animate-pulse card-pad bg-[color-mix(in_srgb,var(--text)_4%,transparent)]" aria-hidden />,
   }
 );
 
@@ -508,7 +508,7 @@ export default function CampaignDetailPage() {
                 Límites alineados con el motor (messages, inmails, connection_requests, etc.). Usa un número alto para efectivamente «sin
                 límite».
               </p>
-              <div className="rounded-[var(--radius-md)] border border-[var(--border)] bg-[color-mix(in_srgb,var(--text)_3%,var(--surface))] p-4 text-xs leading-relaxed text-[var(--muted)]">
+              <div className="rounded-[var(--radius-md)] border border-[var(--border)] bg-[color-mix(in_srgb,var(--text)_3%,transparent)] p-4 text-xs leading-relaxed text-[var(--muted)]">
                 <p className="font-semibold text-[var(--text)]">Nota</p>
                 <p className="mt-2">
                   Los nodos que comprueban perfil abierto, etiquetas, invitación aceptada, datos en columna, mensaje abierto o respondido
@@ -568,7 +568,7 @@ export default function CampaignDetailPage() {
 
       {startModalOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
-          <div className="w-full max-w-sm rounded-xl border border-[var(--border)] bg-[var(--surface)] p-6 shadow-xl">
+          <div className="w-full max-w-sm rounded-xl border border-[color-mix(in_srgb,var(--text)_10%,transparent)] bg-[color-mix(in_srgb,var(--surface)_65%,transparent)] p-6 shadow-xl backdrop-blur-xl">
             <h2 className="mb-4 text-base font-semibold text-[var(--text)]">Elegir cuenta para iniciar</h2>
             {liAccounts.length === 0 ? (
               <p className="text-sm text-[var(--muted)]">No hay cuentas LinkedIn activas. Conecta una en la sección Cuentas.</p>
@@ -579,7 +579,7 @@ export default function CampaignDetailPage() {
                     key={a.id}
                     className={`flex cursor-pointer items-center gap-3 rounded-lg border p-3 transition-colors ${
                       selectedAccountId === a.id
-                        ? "border-[var(--accent)] bg-[color-mix(in_srgb,var(--accent)_10%,var(--surface))]"
+                        ? "border-[var(--accent)] bg-[color-mix(in_srgb,var(--accent)_10%,transparent)]"
                         : "border-[var(--border)] hover:border-[var(--accent)]/50"
                     }`}
                   >
@@ -594,7 +594,7 @@ export default function CampaignDetailPage() {
                     {a.li_photo_url ? (
                       <img src={a.li_photo_url} alt="" className="h-8 w-8 rounded-full object-cover" />
                     ) : (
-                      <div className="flex h-8 w-8 items-center justify-center rounded-full bg-[color-mix(in_srgb,var(--text)_10%,var(--surface))] text-xs font-bold text-[var(--muted)]">
+                      <div className="flex h-8 w-8 items-center justify-center rounded-full bg-[color-mix(in_srgb,var(--text)_10%,transparent)] text-xs font-bold text-[var(--muted)]">
                         LI
                       </div>
                     )}

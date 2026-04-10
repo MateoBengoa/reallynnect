@@ -162,7 +162,7 @@ export default function ContentAutomationsPage() {
           className="group flex min-h-[11rem] flex-col items-center justify-center gap-3 rounded-[var(--radius-lg)] border-2 border-dashed border-[color-mix(in_srgb,var(--muted)_38%,var(--border))] bg-[color-mix(in_srgb,var(--accent)_5%,transparent)] px-4 py-8 text-center transition-[border-color,background-color,box-shadow] hover:border-[color-mix(in_srgb,var(--accent)_55%,var(--border))] hover:bg-[color-mix(in_srgb,var(--accent)_10%,transparent)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color-mix(in_srgb,var(--accent)_45%,transparent)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--bg)]"
         >
           <span
-            className="flex h-12 w-12 items-center justify-center rounded-full border border-[color-mix(in_srgb,var(--accent)_35%,var(--border))] bg-[color-mix(in_srgb,var(--accent)_14%,var(--surface))] text-[var(--accent)] transition-transform group-hover:scale-105"
+            className="flex h-12 w-12 items-center justify-center rounded-full border border-[color-mix(in_srgb,var(--accent)_35%,var(--border))] bg-[color-mix(in_srgb,var(--accent)_14%,transparent)] text-[var(--accent)] transition-transform group-hover:scale-105"
             aria-hidden
           >
             <svg className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
@@ -189,8 +189,8 @@ export default function ContentAutomationsPage() {
                 <span
                   className={`shrink-0 rounded-full px-2.5 py-0.5 text-[11px] font-semibold uppercase tracking-wide ${
                     active
-                      ? "border border-[color-mix(in_srgb,#22c55e_40%,var(--border))] bg-[color-mix(in_srgb,#22c55e_14%,var(--surface))] text-[#86efac]"
-                      : "border border-[var(--border)] bg-[color-mix(in_srgb,var(--text)_6%,var(--surface))] text-[var(--muted)]"
+                      ? "border border-[color-mix(in_srgb,#22c55e_40%,var(--border))] bg-[color-mix(in_srgb,#22c55e_14%,transparent)] text-[#86efac]"
+                      : "border border-[var(--border)] bg-[color-mix(in_srgb,var(--text)_6%,transparent)] text-[var(--muted)]"
                   }`}
                 >
                   {active ? "Activa" : "Inactiva"}
@@ -199,7 +199,7 @@ export default function ContentAutomationsPage() {
               <div className="flex flex-1 flex-col gap-3 card-pad pt-3">
                 <p className="line-clamp-2 flex-1 text-sm leading-relaxed text-[var(--muted)]">{r.reply_template}</p>
                 <div className="flex flex-wrap gap-1.5">
-                  <span className="inline-flex rounded-md border border-[var(--border)] bg-[color-mix(in_srgb,var(--text)_4%,var(--surface))] px-2 py-0.5 text-[11px] font-medium text-[var(--text)]">
+                  <span className="inline-flex rounded-md border border-[var(--border)] bg-[color-mix(in_srgb,var(--text)_4%,transparent)] px-2 py-0.5 text-[11px] font-medium text-[var(--text)]">
                     {r.rule_type === "dm" ? "DM" : "Comentario"}
                   </span>
                   {r.use_ai && (
@@ -240,7 +240,7 @@ export default function ContentAutomationsPage() {
 
       {composerOpen && (
         <form onSubmit={submitRule} className="card mb-10 flex min-w-0 max-w-3xl flex-col overflow-hidden shadow-[var(--shadow-md)]">
-          <div className="border-b border-[var(--border)] bg-[color-mix(in_srgb,var(--accent)_6%,var(--surface))] px-4 py-4 sm:px-5 sm:py-5">
+          <div className="border-b border-[var(--border)] bg-[color-mix(in_srgb,var(--accent)_6%,transparent)] px-4 py-4 sm:px-5 sm:py-5">
             <div className="flex items-start justify-between gap-3">
               <div>
                 <h2 className="text-base font-semibold tracking-tight text-[var(--text)] sm:text-lg">
@@ -257,7 +257,7 @@ export default function ContentAutomationsPage() {
                   Cerrar
                 </button>
                 <div
-                  className="flex h-10 w-10 items-center justify-center rounded-[var(--radius-md)] bg-[color-mix(in_srgb,var(--accent)_18%,var(--surface))] text-[var(--accent)]"
+                  className="flex h-10 w-10 items-center justify-center rounded-[var(--radius-md)] bg-[color-mix(in_srgb,var(--accent)_18%,transparent)] text-[var(--accent)]"
                   aria-hidden
                 >
                   <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.75}>
@@ -278,7 +278,7 @@ export default function ContentAutomationsPage() {
           </div>
 
           <div className="card-pad flex flex-col gap-6 sm:gap-7">
-            <label className="flex cursor-pointer items-center justify-between gap-4 rounded-[var(--radius-md)] border border-[var(--border)] bg-[color-mix(in_srgb,var(--text)_2%,var(--surface))] px-3.5 py-3">
+            <label className="flex cursor-pointer items-center justify-between gap-4 rounded-[var(--radius-md)] border border-[var(--border)] bg-[color-mix(in_srgb,var(--text)_2%,transparent)] px-3.5 py-3">
               <span className="text-sm font-medium text-[var(--text)]">Regla activa (el worker la aplicará)</span>
               <input
                 type="checkbox"
@@ -291,7 +291,7 @@ export default function ContentAutomationsPage() {
             <div>
               <span className={`${labelCap} mb-2`}>Canal</span>
               <div
-                className="flex rounded-[var(--radius-lg)] border border-[var(--border)] bg-[color-mix(in_srgb,var(--text)_4%,var(--bg))] p-1"
+                className="flex rounded-[var(--radius-lg)] border border-[var(--border)] bg-[color-mix(in_srgb,var(--text)_4%,transparent)] p-1"
                 role="group"
                 aria-label="Tipo de regla"
               >
@@ -300,7 +300,7 @@ export default function ContentAutomationsPage() {
                   onClick={() => setRuleType("dm")}
                   className={`flex-1 rounded-[var(--radius-md)] py-2.5 text-sm font-medium transition-[color,background,box-shadow] ${
                     ruleType === "dm"
-                      ? "bg-[var(--surface)] text-[var(--text)] shadow-[var(--shadow-sm)]"
+                      ? "bg-[color-mix(in_srgb,var(--surface)_32%,transparent)] text-[var(--text)] shadow-[var(--shadow-sm)]"
                       : "text-[var(--muted)] hover:text-[var(--text)]"
                   }`}
                 >
@@ -311,7 +311,7 @@ export default function ContentAutomationsPage() {
                   onClick={() => setRuleType("comment")}
                   className={`flex-1 rounded-[var(--radius-md)] py-2.5 text-sm font-medium transition-[color,background,box-shadow] ${
                     ruleType === "comment"
-                      ? "bg-[var(--surface)] text-[var(--text)] shadow-[var(--shadow-sm)]"
+                      ? "bg-[color-mix(in_srgb,var(--surface)_32%,transparent)] text-[var(--text)] shadow-[var(--shadow-sm)]"
                       : "text-[var(--muted)] hover:text-[var(--text)]"
                   }`}
                 >
@@ -352,7 +352,7 @@ export default function ContentAutomationsPage() {
               />
             </div>
 
-            <div className="rounded-[var(--radius-lg)] border border-[var(--border)] bg-[color-mix(in_srgb,var(--text)_3%,var(--surface))] p-4 sm:p-5">
+            <div className="rounded-[var(--radius-lg)] border border-[var(--border)] bg-[color-mix(in_srgb,var(--text)_3%,transparent)] p-4 sm:p-5">
               <span className={`${labelCap} mb-3`}>Alcance (opcional)</span>
               <div className="grid gap-4 sm:grid-cols-2">
                 <label className="block min-w-0">
@@ -379,7 +379,7 @@ export default function ContentAutomationsPage() {
 
             <div className="space-y-3">
               <span className={`${labelCap} mb-2`}>Inteligencia artificial</span>
-              <label className="flex cursor-pointer items-center justify-between gap-4 rounded-[var(--radius-md)] border border-[var(--border)] bg-[color-mix(in_srgb,var(--text)_2%,var(--surface))] px-3.5 py-3 transition-colors hover:bg-[color-mix(in_srgb,var(--text)_4%,var(--surface))]">
+              <label className="flex cursor-pointer items-center justify-between gap-4 rounded-[var(--radius-md)] border border-[var(--border)] bg-[color-mix(in_srgb,var(--text)_2%,transparent)] px-3.5 py-3 transition-colors hover:bg-[color-mix(in_srgb,var(--text)_4%,transparent)]">
                 <span className="text-sm text-[var(--text)]">Generar respuesta con Gemini en el hilo</span>
                 <input
                   type="checkbox"
@@ -405,7 +405,7 @@ export default function ContentAutomationsPage() {
                 value={dmFollowup}
                 onChange={(e) => setDmFollowup(e.target.value)}
               />
-              <label className="flex cursor-pointer items-center justify-between gap-4 rounded-[var(--radius-md)] border border-[var(--border)] bg-[color-mix(in_srgb,var(--text)_2%,var(--surface))] px-3.5 py-3 transition-colors hover:bg-[color-mix(in_srgb,var(--text)_4%,var(--surface))]">
+              <label className="flex cursor-pointer items-center justify-between gap-4 rounded-[var(--radius-md)] border border-[var(--border)] bg-[color-mix(in_srgb,var(--text)_2%,transparent)] px-3.5 py-3 transition-colors hover:bg-[color-mix(in_srgb,var(--text)_4%,transparent)]">
                 <span className="text-sm text-[var(--text)]">DM de seguimiento con Gemini</span>
                 <input
                   type="checkbox"
@@ -417,7 +417,7 @@ export default function ContentAutomationsPage() {
             </div>
           </div>
 
-          <div className="card-footer flex w-full flex-wrap items-center justify-between gap-3 border-t border-[var(--border)] bg-[color-mix(in_srgb,var(--text)_2%,var(--surface))] !justify-between">
+          <div className="card-footer flex w-full flex-wrap items-center justify-between gap-3 border-t border-[var(--border)] bg-[color-mix(in_srgb,var(--text)_2%,transparent)] !justify-between">
             <button type="button" className="btn-ghost min-h-9" onClick={closeComposer}>
               Cancelar
             </button>

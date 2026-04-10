@@ -96,7 +96,7 @@ export function FloatingDock({ onLogout }: FloatingDockProps) {
         {moreOpen && (
           <div
             role="menu"
-            className="w-full min-w-[min(100vw-1.5rem,20rem)] rounded-2xl border border-white/10 bg-[var(--surface)] p-2 shadow-xl backdrop-blur-md"
+            className="w-full min-w-[min(100vw-1.5rem,20rem)] rounded-2xl border border-white/10 bg-[color-mix(in_srgb,var(--surface)_32%,transparent)] p-2 shadow-xl backdrop-blur-md"
           >
             <p className="px-3 pb-1 pt-1 text-[10px] font-semibold uppercase tracking-wide text-[var(--muted)]">Más</p>
             <ul className="flex max-h-[min(60vh,22rem)] flex-col gap-0.5 overflow-y-auto">
@@ -132,7 +132,7 @@ export function FloatingDock({ onLogout }: FloatingDockProps) {
         )}
 
         <nav
-          className="flex items-center justify-center gap-1 rounded-2xl border border-white/10 bg-[var(--surface)]/95 px-2 py-2 shadow-lg backdrop-blur-md sm:gap-2 sm:px-3"
+          className="flex items-center justify-center gap-1 rounded-2xl border border-white/10 bg-[color-mix(in_srgb,var(--surface)_32%,transparent)]/95 px-2 py-2 shadow-lg backdrop-blur-md sm:gap-2 sm:px-3"
           aria-label="Navegación principal"
         >
           {primaryNav.map((item) => {

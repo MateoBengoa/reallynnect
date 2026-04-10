@@ -253,7 +253,7 @@ export function ImportContactsModal({ open, onClose, campaignId, onDone }: Impor
           {!mode && (
             <p className="mb-4 rounded-lg border border-[color-mix(in_srgb,var(--accent)_40%,var(--border))] bg-[color-mix(in_srgb,var(--accent)_10%,transparent)] px-3 py-2 text-sm text-[var(--text)]">
               <strong className="font-semibold">Apify:</strong> elige la primera tarjeta «Apify — Lead finder». Si usas URL de LinkedIn abajo y «Encolar…», la petición es{" "}
-              <code className="rounded bg-[var(--surface)] px-1 text-xs">/leads/import-job</code> y{" "}
+              <code className="rounded bg-[color-mix(in_srgb,var(--surface)_32%,transparent)] px-1 text-xs">/leads/import-job</code> y{" "}
               <span className="font-medium">no</span> crea runs en Apify (solo scrape con el worker).
             </p>
           )}

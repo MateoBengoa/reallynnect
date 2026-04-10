@@ -200,7 +200,7 @@ export function DashboardNavbar({ onLogout }: DashboardNavbarProps) {
             {menuOpen && (
               <div
                 role="menu"
-                className="absolute right-0 top-[calc(100%+0.5rem)] w-[min(calc(100vw-1.5rem),16rem)] rounded-xl border border-[var(--border)] bg-[var(--surface)] py-2 shadow-xl"
+                className="absolute right-0 top-[calc(100%+0.5rem)] w-[min(calc(100vw-1.5rem),16rem)] rounded-xl border border-[var(--border)] bg-[color-mix(in_srgb,var(--surface)_32%,transparent)] py-2 shadow-xl"
               >
                 <div className="border-b border-[var(--border)] px-3 pb-3 pt-1">
                   <p className="truncate font-semibold text-[var(--text)]">{name}</p>

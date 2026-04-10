@@ -275,7 +275,7 @@ export default function AccountsPage() {
                   referrerPolicy="no-referrer"
                 />
               ) : (
-                <div className="flex h-14 w-14 shrink-0 items-center justify-center rounded-full bg-[color-mix(in_srgb,var(--text)_6%,var(--surface))] text-lg text-[var(--muted)]">
+                <div className="flex h-14 w-14 shrink-0 items-center justify-center rounded-full bg-[color-mix(in_srgb,var(--text)_6%,transparent)] text-lg text-[var(--muted)]">
                   in
                 </div>
               )}
@@ -347,7 +347,7 @@ export default function AccountsPage() {
               >
                 {syncingId === a.id ? "Sincronizando…" : "Sincronizar perfil"}
               </button>
-              <span className="rounded-[var(--radius-sm)] bg-[color-mix(in_srgb,var(--text)_6%,var(--surface))] px-2 py-0.5 text-xs text-[var(--muted)]">
+              <span className="rounded-[var(--radius-sm)] bg-[color-mix(in_srgb,var(--text)_6%,transparent)] px-2 py-0.5 text-xs text-[var(--muted)]">
                 {a.connection_status}
                 {a.connection_status === "pending" ? " · …" : ""} · {a.softban_status}
               </span>
@@ -375,7 +375,7 @@ export default function AccountsPage() {
                 </button>
               )}
               {proxyOpen === a.id && (
-                <div className="w-full rounded-xl border border-[var(--border)] bg-[color-mix(in_srgb,var(--text)_3%,var(--surface))] p-3 text-xs">
+                <div className="w-full rounded-xl border border-[var(--border)] bg-[color-mix(in_srgb,var(--text)_3%,transparent)] p-3 text-xs">
                   <p className="mb-2 text-[var(--muted)]">Proxy propio (deja vacío usuario/contraseña si no tiene)</p>
                   <div className="grid grid-cols-2 gap-2">
                     <input

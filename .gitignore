@@ -12,3 +12,7 @@ backend/out.json
 backend/out_utf8.json
 backend/test_apify.js
 automation/src/_write_test.txt
+
+# Exports HTML guardados de LinkedIn y capturas sueltas en la raíz
+**/*LinkedIn*.html
+/*.png

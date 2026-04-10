@@ -164,8 +164,8 @@ export default function CalendarPage() {
                     disabled={!valid}
                     onClick={() => valid && setSelected(day === selected ? null : day)}
                     className={`min-h-[4.5rem] border-b border-r border-[var(--border)] p-1.5 text-left transition-colors
-                      ${!valid ? "bg-[color-mix(in_srgb,var(--text)_2%,var(--surface))]" : ""}
-                      ${isSelected ? "bg-[color-mix(in_srgb,var(--accent)_12%,var(--surface))]" : valid ? "hover:bg-[color-mix(in_srgb,var(--text)_3%,var(--surface))]" : ""}
+                      ${!valid ? "bg-[color-mix(in_srgb,var(--text)_2%,transparent)]" : ""}
+                      ${isSelected ? "bg-[color-mix(in_srgb,var(--accent)_12%,transparent)]" : valid ? "hover:bg-[color-mix(in_srgb,var(--text)_3%,transparent)]" : ""}
                     `}
                   >
                     {valid && (
@@ -238,13 +238,13 @@ export default function CalendarPage() {
                       : null;
                     return (
                       <Link key={p.id} href={`/dashboard/content/posts/${p.id}`}
-                        className="block rounded-[var(--radius-md)] border border-[var(--border)] bg-[color-mix(in_srgb,var(--text)_2%,var(--surface))] px-3 py-2.5 transition-colors hover:border-[color-mix(in_srgb,var(--accent)_40%,var(--border))]">
+                        className="block rounded-[var(--radius-md)] border border-[var(--border)] bg-[color-mix(in_srgb,var(--text)_2%,transparent)] px-3 py-2.5 transition-colors hover:border-[color-mix(in_srgb,var(--accent)_40%,var(--border))]">
                         <div className="mb-1 flex items-center justify-between gap-2">
                           <span className="truncate text-xs font-medium text-[var(--text)]">{name}</span>
                           <span className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] font-semibold ${
-                            p.status === "published" ? "bg-[color-mix(in_srgb,#22c55e_14%,var(--surface))] text-[#86efac]" :
-                            p.status === "scheduled" ? "bg-[color-mix(in_srgb,var(--accent)_14%,var(--surface))] text-[var(--accent)]" :
-                            "bg-[color-mix(in_srgb,var(--text)_8%,var(--surface))] text-[var(--muted)]"
+                            p.status === "published" ? "bg-[color-mix(in_srgb,#22c55e_14%,transparent)] text-[#86efac]" :
+                            p.status === "scheduled" ? "bg-[color-mix(in_srgb,var(--accent)_14%,transparent)] text-[var(--accent)]" :
+                            "bg-[color-mix(in_srgb,var(--text)_8%,transparent)] text-[var(--muted)]"
                           }`}>
                             {STATUS_LABEL[p.status] ?? p.status}
                           </span>

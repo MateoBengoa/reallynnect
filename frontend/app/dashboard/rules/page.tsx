@@ -106,8 +106,8 @@ export default function RulesPage() {
     <div>
       <h1 className="page-title mb-4">Reglas por palabra clave</h1>
       <p className="page-desc mb-4">
-        <code className="text-[var(--text)]">poll_messages</code> usa reglas tipo DM;{" "}
-        <code className="text-[var(--text)]">poll_comments</code> usa tipo comentario. Ola B: opcionalmente filtra por cuenta
+        Las reglas tipo <strong>DM</strong> se evalúan al abrir un hilo en Inbox (sincronización del chat).{" "}
+        <code className="text-[var(--text)]">poll_comments</code> (programado por el worker) usa tipo comentario. Ola B: opcionalmente filtra por cuenta
         y por post (tras publicar, el post guarda URL en LinkedIn para acotar notificaciones). DM de seguimiento tras comentar
         es opcional.
       </p>

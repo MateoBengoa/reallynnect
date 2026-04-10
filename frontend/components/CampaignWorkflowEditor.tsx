@@ -60,8 +60,8 @@ const CampaignStepNode = memo(function CampaignStepNode({ data, selected }: Node
     <div
       className={`min-w-[168px] max-w-[220px] rounded-[var(--radius-lg)] border px-3 py-2.5 shadow-[var(--shadow-sm)] ${
         selected
-          ? "border-[var(--accent)] bg-[var(--surface)] ring-2 ring-[color-mix(in_srgb,var(--accent)_25%,transparent)]"
-          : "border-[var(--border)] bg-[var(--surface)]"
+          ? "border-[var(--accent)] bg-[color-mix(in_srgb,var(--surface)_32%,transparent)] ring-2 ring-[color-mix(in_srgb,var(--accent)_25%,transparent)]"
+          : "border-[var(--border)] bg-[color-mix(in_srgb,var(--surface)_32%,transparent)]"
       }`}
     >
       <Handle type="target" position={Position.Left} className="!h-2.5 !w-2.5 !border-0 !bg-[var(--muted)]" />
@@ -274,7 +274,7 @@ function WorkflowCanvasInner({ steps, setSteps, stepTypes, edges, setEdges }: In
 
   return (
     <div className="grid gap-4 lg:grid-cols-[1fr_min(320px,100%)]">
-      <div className="card h-[min(560px,calc(100vh-16rem))] min-h-[360px] overflow-hidden bg-[color-mix(in_srgb,var(--surface)_55%,var(--bg))] p-0 shadow-none">
+      <div className="card h-[min(560px,calc(100vh-16rem))] min-h-[360px] overflow-hidden bg-[color-mix(in_srgb,var(--surface)_55%,transparent)] p-0 shadow-none">
         <ReactFlow
           nodes={nodes}
           edges={edges}
@@ -294,11 +294,11 @@ function WorkflowCanvasInner({ steps, setSteps, stepTypes, edges, setEdges }: In
         >
           <Background variant={BackgroundVariant.Dots} gap={16} size={1} color="color-mix(in srgb, var(--muted) 14%, transparent)" />
           <Controls
-            className="!m-2 !rounded-[var(--radius-md)] !border !border-[var(--border)] !bg-[var(--surface)] [&_button]:!fill-[var(--text)]"
+            className="!m-2 !rounded-[var(--radius-md)] !border !border-[var(--border)] !bg-[color-mix(in_srgb,var(--surface)_32%,transparent)] [&_button]:!fill-[var(--text)]"
             showInteractive={false}
           />
           <MiniMap
-            className="!m-2 !rounded-[var(--radius-md)] !border !border-[var(--border)] !bg-[color-mix(in_srgb,var(--surface)_92%,var(--bg))]"
+            className="!m-2 !rounded-[var(--radius-md)] !border !border-[var(--border)] !bg-[color-mix(in_srgb,var(--surface)_92%,transparent)]"
             maskColor="color-mix(in srgb, var(--bg) 55%, transparent)"
             nodeColor={() => "var(--accent)"}
           />
@@ -320,7 +320,7 @@ function WorkflowCanvasInner({ steps, setSteps, stepTypes, edges, setEdges }: In
               <button
                 key={t}
                 type="button"
-                className="rounded-[var(--radius-md)] border border-[var(--border)] bg-[color-mix(in_srgb,var(--text)_5%,var(--surface))] px-2 py-1 text-[10px] font-medium text-[var(--text)] transition-colors hover:bg-[color-mix(in_srgb,var(--text)_9%,var(--surface))] focus-visible:outline-none"
+                className="rounded-[var(--radius-md)] border border-[var(--border)] bg-[color-mix(in_srgb,var(--text)_5%,transparent)] px-2 py-1 text-[10px] font-medium text-[var(--text)] transition-colors hover:bg-[color-mix(in_srgb,var(--text)_9%,transparent)] focus-visible:outline-none"
                 onClick={() => addStep(t)}
               >
                 {STEP_LABELS[t] ?? t}

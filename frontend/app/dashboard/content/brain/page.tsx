@@ -186,7 +186,7 @@ export default function BrainPage() {
       {/* Header */}
       <header className="mb-7">
         <div className="flex items-center gap-3 mb-3">
-          <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-[var(--radius-lg)] bg-[color-mix(in_srgb,var(--accent)_16%,var(--surface))] text-[var(--accent)]">
+          <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-[var(--radius-lg)] bg-[color-mix(in_srgb,var(--accent)_16%,transparent)] text-[var(--accent)]">
             <svg className="h-6 w-6" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.75} strokeLinecap="round" strokeLinejoin="round">
               <path d="M9.5 2A2.5 2.5 0 0 1 12 4.5v15a2.5 2.5 0 0 1-4.96-.46 2.5 2.5 0 0 1-2.96-3.08 3 3 0 0 1-.34-5.58 2.5 2.5 0 0 1 1.32-4.24 2.5 2.5 0 0 1 1.98-3A2.5 2.5 0 0 1 9.5 2Z" />
               <path d="M14.5 2A2.5 2.5 0 0 0 12 4.5v15a2.5 2.5 0 0 0 4.96-.46 2.5 2.5 0 0 0 2.96-3.08 3 3 0 0 0 .34-5.58 2.5 2.5 0 0 0-1.32-4.24 2.5 2.5 0 0 0-1.98-3A2.5 2.5 0 0 0 14.5 2Z" />
@@ -199,7 +199,7 @@ export default function BrainPage() {
         </div>
 
         {/* Toggle empresa / marca personal */}
-        <div className="flex items-center gap-1 rounded-[var(--radius-md)] border border-[var(--border)] bg-[color-mix(in_srgb,var(--text)_4%,var(--surface))] p-1 w-fit">
+        <div className="flex items-center gap-1 rounded-[var(--radius-md)] border border-[var(--border)] bg-[color-mix(in_srgb,var(--text)_4%,transparent)] p-1 w-fit">
           {(["personal", "company"] as BrandType[]).map((m) => (
             <button key={m} type="button"
               onClick={() => setMode(m)}
@@ -380,7 +380,7 @@ export default function BrainPage() {
                   const isValid = hasTag && hasDesc;
                   const showError = isDirty && !isValid;
                   return (
-                    <div key={p.id} className="flex items-start gap-3 rounded-[var(--radius-md)] border border-[var(--border)] bg-[color-mix(in_srgb,var(--text)_2%,var(--surface))] p-3">
+                    <div key={p.id} className="flex items-start gap-3 rounded-[var(--radius-md)] border border-[var(--border)] bg-[color-mix(in_srgb,var(--text)_2%,transparent)] p-3">
                       {/* Thumbnail */}
                       <div className="group relative h-16 w-16 shrink-0 overflow-hidden rounded-[var(--radius-md)] border border-[var(--border)]">
                         <img src={p.url} alt="" className="h-full w-full object-cover" />

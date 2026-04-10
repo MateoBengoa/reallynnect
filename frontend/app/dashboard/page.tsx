@@ -18,8 +18,8 @@ type CrmSummary = {
 };
 
 const PIPELINE: { key: PipelineKey; label: string; color: string; bg: string }[] = [
-  { key: "not_contacted", label: "Sin contactar",  color: "text-[var(--muted)]",  bg: "bg-[color-mix(in_srgb,var(--text)_8%,var(--surface))]" },
-  { key: "in_campaign",   label: "En campaña",     color: "text-[var(--accent)]", bg: "bg-[color-mix(in_srgb,var(--accent)_12%,var(--surface))]" },
+  { key: "not_contacted", label: "Sin contactar",  color: "text-[var(--muted)]",  bg: "bg-[color-mix(in_srgb,var(--text)_8%,transparent)]" },
+  { key: "in_campaign",   label: "En campaña",     color: "text-[var(--accent)]", bg: "bg-[color-mix(in_srgb,var(--accent)_12%,transparent)]" },
   { key: "contacted",     label: "Contactado",      color: "text-sky-400",         bg: "bg-sky-400/10" },
   { key: "replied",       label: "Respondió",       color: "text-emerald-400",     bg: "bg-emerald-400/10" },
   { key: "not_accepted",  label: "No aceptó",       color: "text-amber-400",       bg: "bg-amber-400/10" },
@@ -31,7 +31,7 @@ function Avatar({ name, photo, size = 8 }: { name: string | null; photo: string 
   const cls = `h-${size} w-${size} shrink-0 rounded-full object-cover`;
   if (photo) return <img src={photo} alt={name ?? ""} className={cls} onError={(e) => { (e.currentTarget as HTMLImageElement).style.display = "none"; }} />;
   return (
-    <div className={`flex h-${size} w-${size} shrink-0 items-center justify-center rounded-full bg-[color-mix(in_srgb,var(--accent)_16%,var(--surface))] text-xs font-bold text-[var(--accent)]`}>
+    <div className={`flex h-${size} w-${size} shrink-0 items-center justify-center rounded-full bg-[color-mix(in_srgb,var(--accent)_16%,transparent)] text-xs font-bold text-[var(--accent)]`}>
       {initial}
     </div>
   );
@@ -128,7 +128,7 @@ export default function DashboardHome() {
               <li className="px-4 py-6 text-center text-xs text-[var(--muted)]">Ninguno aún</li>
             )}
             {(data?.recent_replied ?? []).map((l) => (
-              <li key={l.lead_id} className="flex items-center gap-3 px-4 py-3 hover:bg-[color-mix(in_srgb,var(--text)_3%,var(--surface))]">
+              <li key={l.lead_id} className="flex items-center gap-3 px-4 py-3 hover:bg-[color-mix(in_srgb,var(--text)_3%,transparent)]">
                 <Avatar name={l.name} photo={l.photo_url} size={8} />
                 <div className="min-w-0">
                   <p className="truncate text-sm font-medium text-[var(--text)]">{l.name ?? "Lead"}</p>
@@ -150,7 +150,7 @@ export default function DashboardHome() {
               <li className="px-4 py-6 text-center text-xs text-[var(--muted)]">Sin mensajes aún</li>
             )}
             {(data?.recent_conversations ?? []).map((m) => (
-              <li key={m.id} className="flex items-start gap-3 px-4 py-3 hover:bg-[color-mix(in_srgb,var(--text)_3%,var(--surface))]">
+              <li key={m.id} className="flex items-start gap-3 px-4 py-3 hover:bg-[color-mix(in_srgb,var(--text)_3%,transparent)]">
                 <Avatar name={m.peer_name} photo={m.peer_photo_url} size={7} />
                 <div className="min-w-0 flex-1">
                   <div className="flex items-center justify-between gap-1">
@@ -178,7 +178,7 @@ export default function DashboardHome() {
                 <li className="px-4 py-6 text-center text-xs text-[var(--muted)]">Sin campañas activas</li>
               )}
               {(data?.campaigns_active ?? []).map((c) => (
-                <li key={c.id} className="flex items-center gap-2 px-4 py-2.5 hover:bg-[color-mix(in_srgb,var(--text)_3%,var(--surface))]">
+                <li key={c.id} className="flex items-center gap-2 px-4 py-2.5 hover:bg-[color-mix(in_srgb,var(--text)_3%,transparent)]">
                   <span className="h-2 w-2 shrink-0 rounded-full bg-[var(--accent)]" />
                   <p className="truncate text-sm text-[var(--text)]">{c.name}</p>
                 </li>

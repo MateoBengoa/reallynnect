@@ -1301,17 +1301,38 @@ async function completeLinkedInInviteAfterConnectClick(
   page: Page,
   note?: string
 ): Promise<{ ok: boolean; error?: string }> {
-  const inviteUrlRe = /custom-invite|invite-connect|invite-send|mynetwork\/invite|\/invite\//i;
+  const inviteUrlRe =
+    /custom-invite|invite-connect|invite-send|mynetwork\/invite|\/invite\/|member-invite|growth\/invite|preconnect/i;
 
   const inviteLikeText = (txt: string) =>
-    /invitación|invitation|nota|note|añadir|add a note|conectar|connect|personaliz|personalize|sin nota|without a note/i.test(
+    /invitación|invitation|nota|note|añadir|add a note|conectar|connect|personaliz|personalize|sin nota|without a note|sem nota|adicionar nota/i.test(
       txt
     );
+
+  /** LinkedIn a veces muestra solo CTAs sin palabras clave en el título del overlay. */
+  const hasVisibleInvitePrimaryButtons = async (): Promise<boolean> => {
+    const names = [
+      /^Enviar sin nota$/i,
+      /^Send without a note$/i,
+      /^Send without note$/i,
+      /^Enviar sem nota$/i,
+      /^Añadir nota$/i,
+      /^Add a note$/i,
+      /^Agregar nota$/i,
+    ];
+    for (const name of names) {
+      const b = page.getByRole("button", { name });
+      if (await b.first().isVisible({ timeout: 250 }).catch(() => false)) return true;
+    }
+    return false;
+  };
 
   const hasInviteSurface = async (): Promise<boolean> => {
     if (inviteUrlRe.test(page.url())) return true;
 
-    const dlg = page.locator('[role="dialog"]');
+    if (await hasVisibleInvitePrimaryButtons()) return true;
+
+    const dlg = page.locator('[role="dialog"], [role="alertdialog"]');
     const dn = await dlg.count().catch(() => 0);
     for (let i = 0; i < Math.min(dn, 8); i++) {
       if (!(await dlg.nth(i).isVisible({ timeout: 500 }).catch(() => false))) continue;
@@ -1319,21 +1340,52 @@ async function completeLinkedInInviteAfterConnectClick(
       if (inviteLikeText(txt)) return true;
     }
 
-    const modals = page.locator(".artdeco-modal, [data-test-modal-container]");
+    const modals = page.locator(
+      ".artdeco-modal, .artdeco-modal--layer, [data-test-modal-container], [class*='artdeco-modal__layer']"
+    );
     const n = await modals.count().catch(() => 0);
     for (let i = 0; i < Math.min(n, 8); i++) {
       if (!(await modals.nth(i).isVisible({ timeout: 400 }).catch(() => false))) continue;
       const txt = ((await modals.nth(i).innerText().catch(() => "")) || "").toLowerCase();
       if (inviteLikeText(txt)) return true;
     }
-    return false;
+
+    const overlayHasInviteUi = await page.evaluate(() => {
+      const visible = (el: HTMLElement) => {
+        if (!el.offsetParent && window.getComputedStyle(el).display === "none") return false;
+        const r = el.getBoundingClientRect();
+        return r.width > 30 && r.height > 20 && r.bottom > 0 && r.top < window.innerHeight;
+      };
+      const looksLikeInviteLayer = (root: HTMLElement): boolean => {
+        const t = (root.innerText || "").toLowerCase();
+        if (
+          /invitación|invitation|nota|note|añadir|add a note|personaliz|personalize|sin nota|without a note/.test(t)
+        )
+          return true;
+        for (const b of root.querySelectorAll("button")) {
+          const el = b as HTMLElement;
+          if (!visible(el)) continue;
+          const tx = (el.innerText || el.textContent || "").replace(/\s+/g, " ").trim();
+          if (/^enviar sin nota$/i.test(tx) || /^send without a note$/i.test(tx)) return true;
+        }
+        return false;
+      };
+      for (const sel of [".artdeco-modal", '[role="dialog"]', '[role="alertdialog"]', "[data-test-modal-container]"]) {
+        for (const el of document.querySelectorAll(sel)) {
+          const h = el as HTMLElement;
+          if (!visible(h)) continue;
+          if (looksLikeInviteLayer(h)) return true;
+        }
+      }
+      return false;
+    });
+    return overlayHasInviteUi;
   };
 
   /** Solo señales claras en la zona del top card — nunca todo el texto de main (falsos positivos con el feed). */
   const showsPendingOnProfile = async (): Promise<boolean> => {
-    const inMain = page.locator("main");
-    const topScope = inMain.locator(
-      "[class*='pvs-profile-actions'], [data-view-name*='profile-top-card'], .pv-top-card--list, header"
+    const topChrome = page.locator(
+      "main [class*='pvs-profile-actions'], main [data-view-name*='profile-top-card'], main .pv-top-card--list, main header, [class*='pvs-profile-actions'], [data-view-name*='profile-top-card'], [data-view-name='profile-top-card']"
     );
 
     const isNearProfileHeader = async (loc: Locator): Promise<boolean> => {
@@ -1346,14 +1398,15 @@ async function completeLinkedInInviteAfterConnectClick(
         .catch(() => false);
     };
 
-    const withdraw = inMain.getByRole("button", {
+    // El top card a veces está fuera de <main>; getByRole en toda la página + geometría evita el feed.
+    const withdraw = page.getByRole("button", {
       name: /retirar invitación|withdraw invitation|withdraw your invitation|cancel invitation|cancelar invitación/i,
     });
     if ((await withdraw.first().isVisible({ timeout: 600 }).catch(() => false)) && (await isNearProfileHeader(withdraw))) {
       return true;
     }
 
-    const pendingCompact = inMain.getByRole("button", { name: /^(Pendiente|Pending)$/i });
+    const pendingCompact = page.getByRole("button", { name: /^(Pendiente|Pending)$/i });
     if (
       (await pendingCompact.first().isVisible({ timeout: 600 }).catch(() => false)) &&
       (await isNearProfileHeader(pendingCompact))
@@ -1361,7 +1414,7 @@ async function completeLinkedInInviteAfterConnectClick(
       return true;
     }
 
-    const sentScoped = topScope.getByText(
+    const sentScoped = topChrome.getByText(
       /invitación enviada|invitation sent|solicitud enviada|invitation pending|invitación pendiente/i
     );
     if (await sentScoped.first().isVisible({ timeout: 600 }).catch(() => false)) return true;
@@ -1427,13 +1480,15 @@ async function completeLinkedInInviteAfterConnectClick(
     }
 
     const scopes: Locator[] = [];
-    const dlgAll = page.locator('[role="dialog"]');
+    const dlgAll = page.locator('[role="dialog"], [role="alertdialog"]');
     const dnc = await dlgAll.count().catch(() => 0);
     for (let di = 0; di < Math.min(dnc, 8); di++) {
       const d = dlgAll.nth(di);
       if (!(await d.isVisible({ timeout: 400 }).catch(() => false))) continue;
       const dtxt = ((await d.innerText().catch(() => "")) || "").toLowerCase();
-      if (inviteLikeText(dtxt)) scopes.push(d);
+      if (inviteLikeText(dtxt) || (await d.locator("button").filter({ hasText: /sin nota|without a note|add a note|añadir nota/i }).first().isVisible({ timeout: 200 }).catch(() => false))) {
+        scopes.push(d);
+      }
     }
 
     const modalShells = page.locator(
@@ -1481,15 +1536,26 @@ async function completeLinkedInInviteAfterConnectClick(
 
     return page.evaluate((sendWithoutOnly: boolean) => {
       const modalTextLooksLikeInvite = (el: Element): boolean => {
-        const t = ((el as HTMLElement).innerText || "").toLowerCase();
-        return /invitación|invitation|añadir.*nota|add a note|personaliza tu invitación|personalize your invitation/.test(
-          t
-        );
+        const h = el as HTMLElement;
+        const t = (h.innerText || "").toLowerCase();
+        if (
+          /invitación|invitation|añadir.*nota|add a note|personaliza tu invitación|personalize your invitation|sin nota|without a note/.test(
+            t
+          )
+        )
+          return true;
+        for (const b of h.querySelectorAll("button")) {
+          const tx = (b.textContent || "").replace(/\s+/g, " ").trim();
+          if (/^enviar sin nota$/i.test(tx) || /^send without a note$/i.test(tx) || /^send without note$/i.test(tx))
+            return true;
+        }
+        return false;
       };
 
       const roots: Element[] = [];
       for (const sel of [
         '[role="dialog"]',
+        '[role="alertdialog"]',
         ".artdeco-modal",
         ".artdeco-modal--layer",
         "[data-test-modal-container]",

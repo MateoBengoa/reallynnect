@@ -50,6 +50,10 @@ import { generateConnectionMessage, generateDmReply, generateImageBytes } from "
 import { loadProxy, markProxyDegraded, markProxyUsed, pickProxyForAccount } from "../services/proxyAssign.js";
 import { enrichWorkerFailureMessage, startPlaywrightTraceIfConfigured, type TraceController } from "./linkedinRunContext.js";
 import { parseLinkedInInboxListTime } from "../lib/linkedinInboxListTime.js";
+import type { InboxListRow } from "../types/inboxList.js";
+import { parseVoyagerConversationList } from "../lib/voyagerMessagingParse.js";
+import { bulkUpsertInboxConversationsOrdered } from "../services/inboxBulkUpsert.js";
+import { trySyncInboxListHttp } from "../services/linkedinInboxHttpSync.js";
 
 const MAX_ATTEMPTS = 5;
 
@@ -140,7 +144,6 @@ function taskDispatchGroup(action: string, enrollmentId: unknown): number {
   if (action === "warmup_feed") return 4;
   if (action === "import_leads") return 2;
     if (
-      action === "poll_messages" ||
       action === "poll_comments" ||
       action === "sync_inbox" ||
       action === "sync_inbox_thread" ||
@@ -176,25 +179,12 @@ function inboxSyncMaxThreads(): number {
   return inboxEnvInt("INBOX_SYNC_MAX_THREADS", 500);
 }
 
-/** Hilos en poll_messages (suele ser menor que sync manual). */
-function inboxPollMessagesMaxThreads(): number {
-  const v = Number(process.env.INBOX_POLL_MESSAGES_MAX_THREADS);
-  if (Number.isFinite(v) && v > 0) return Math.floor(v);
-  return Math.min(45, inboxSyncMaxThreads());
-}
-
 /** Timeout sync inbox: env o derivado de hilos × ms/hilo. */
 function inboxSyncPollMs(maxThreads: number): number {
   const env = Number(process.env.INBOX_SYNC_TIMEOUT_MS);
   if (Number.isFinite(env) && env >= 120_000) return env;
   const perThread = inboxEnvInt("INBOX_SYNC_MS_PER_THREAD", 2100);
   return Math.max(360_000, 80_000 + maxThreads * perThread);
-}
-
-function inboxPollMessagesPollMs(maxThreads: number): number {
-  const base = Number(process.env.POLL_TASK_TIMEOUT_MS ?? 130_000);
-  const perThread = inboxEnvInt("INBOX_SYNC_MS_PER_THREAD", 2100);
-  return Math.max(Number.isFinite(base) ? base : 130_000, 110_000 + maxThreads * perThread);
 }
 
 /** Timeout para abrir un hilo y volcar burbujas (sync bajo demanda). */
@@ -252,15 +242,6 @@ async function extractThreadIdFromMessagingPane(page: Page): Promise<string | nu
     .catch(() => null)) as string | null;
   return fromMain || null;
 }
-
-type InboxListRow = {
-  conversationId: string;
-  peerName: string | null;
-  preview: string;
-  peerPhotoUrl: string | null;
-  /** ISO 8601: fecha/hora del último mensaje según la fila de lista de LinkedIn */
-  lastActivityAtIso?: string | null;
-};
 
 function resolveListRowActivityIso(
   row: { timeStampRaw?: string; timeStampText?: string },
@@ -505,22 +486,6 @@ async function extractInboxRowsFromOrderedListDom(page: Page, max: number): Prom
   }
 }
 
-async function upsertInboxConversationRows(sb: SupabaseClient, accountId: string, rows: InboxListRow[]): Promise<void> {
-  if (!rows.length) return;
-  const now = new Date().toISOString();
-  const payload = rows.map((r) => ({
-    account_id: accountId,
-    conversation_id: r.conversationId,
-    peer_name: r.peerName ?? null,
-    peer_photo_url: r.peerPhotoUrl ?? null,
-    list_preview: (r.preview ?? "—").trim().slice(0, 500) || "—",
-    list_last_activity_at: r.lastActivityAtIso ?? null,
-    updated_at: now,
-  }));
-  const { error } = await sb.from("inbox_conversations").upsert(payload, { onConflict: "account_id,conversation_id" });
-  if (error) console.error("[inbox_sync] upsert inbox_conversations:", error.message);
-}
-
 async function upsertInboxConversationOne(
   sb: SupabaseClient,
   accountId: string,
@@ -548,50 +513,6 @@ async function upsertInboxConversationOne(
   if (row.list_last_activity_at !== undefined) payload.list_last_activity_at = row.list_last_activity_at;
   const { error } = await sb.from("inbox_conversations").upsert(payload, { onConflict: "account_id,conversation_id" });
   if (error) console.error("[inbox_sync] upsert one inbox_conversations:", error.message);
-}
-
-/** Volcado masivo con orden de lista LinkedIn (list_rank 0 = más reciente arriba). */
-async function bulkUpsertInboxConversationsOrdered(
-  sb: SupabaseClient,
-  accountId: string,
-  rows: InboxListRow[],
-  syncBaseTime: number
-): Promise<void> {
-  if (!rows.length) return;
-  const n = rows.length;
-  const chunk = inboxEnvInt("INBOX_BULK_UPSERT_CHUNK", 480);
-  const parallel = Math.min(4, Math.max(1, inboxEnvInt("INBOX_BULK_UPSERT_PARALLEL", 2)));
-
-  const upsertSlice = async (off: number, slice: InboxListRow[]): Promise<void> => {
-    if (!slice.length) return;
-    const payload = slice.map((r, j) => {
-      const i = off + j;
-      const preview = (r.preview ?? "—").trim().slice(0, 500) || "—";
-      return {
-        account_id: accountId,
-        conversation_id: r.conversationId,
-        peer_name: r.peerName ?? null,
-        peer_photo_url: r.peerPhotoUrl ?? null,
-        list_preview: preview,
-        list_rank: i,
-        list_last_activity_at: r.lastActivityAtIso ?? null,
-        updated_at: new Date(syncBaseTime + (n - i) * 2000).toISOString(),
-      };
-    });
-    const { error } = await sb.from("inbox_conversations").upsert(payload, { onConflict: "account_id,conversation_id" });
-    if (error) console.error("[inbox_sync] bulk upsert inbox_conversations:", error.message);
-  };
-
-  for (let off = 0; off < rows.length; off += chunk * parallel) {
-    const batch: Promise<void>[] = [];
-    for (let p = 0; p < parallel; p++) {
-      const start = off + p * chunk;
-      if (start >= rows.length) break;
-      batch.push(upsertSlice(start, rows.slice(start, start + chunk)));
-    }
-    await Promise.all(batch);
-  }
-  console.log(`[inbox_sync] bulk lista ordenada: ${rows.length} conversaciones (list_rank 0…${n - 1})`);
 }
 
 async function extractPeerNameFromMessagingThread(page: Page): Promise<string | null> {
@@ -627,11 +548,17 @@ async function extractPeerPhotoUrlFromThread(page: Page): Promise<string | null>
           ".msg-thread__top-bar img",
           "header .msg-entity-lockup img"
         ];
+        function okProfileUrl(u) {
+          if (!u || u.indexOf("data:") === 0) return false;
+          if (u.indexOf("licdn.com") < 0) return false;
+          if (/ghost|ui-person-ghost|default_profile|generic/i.test(u)) return false;
+          return true;
+        }
         for (var pi = 0; pi < panelSels.length; pi++) {
           var el = document.querySelector(panelSels[pi]);
           if (!el) continue;
           var pu = getImgUrl(el);
-          if (pu && pu.indexOf("media.licdn.com") >= 0) return pu;
+          if (okProfileUrl(pu)) return pu;
         }
         // 2. Buscar en el panel del hilo específicamente (no toda la página)
         var pane = document.querySelector(
@@ -641,7 +568,8 @@ async function extractPeerPhotoUrlFromThread(page: Page): Promise<string | null>
           var paneImgs = pane.querySelectorAll("img");
           for (var pi2 = 0; pi2 < paneImgs.length; pi2++) {
             var img = paneImgs[pi2];
-            if (img.naturalWidth > 0 && img.src && img.src.indexOf("media.licdn.com") >= 0) return img.src;
+            var src = getImgUrl(img) || (img.src || "");
+            if (img.naturalWidth > 0 && okProfileUrl(src)) return src;
           }
         }
         return "";
@@ -693,15 +621,34 @@ function extractLastBubbleFromLinkedInDump(raw: string): string {
   return normalizeMsgText(out).slice(0, 4000);
 }
 
+/** LinkedIn a veces concatena el nombre completo dos veces antes del cuerpo del mensaje. */
+function stripDuplicateLeadingFullName(text: string): string {
+  const s = normalizeMsgText(text);
+  if (s.length < 12) return s;
+  const parts = s.split(" ");
+  if (parts.length < 4) return s;
+  for (let w = Math.min(12, Math.floor(parts.length / 2)); w >= 2; w--) {
+    const a = parts.slice(0, w).join(" ");
+    const b = parts.slice(w, w + w).join(" ");
+    if (a.length >= 5 && a === b) {
+      const rest = parts.slice(w + w).join(" ").trim();
+      return rest || s;
+    }
+  }
+  return s;
+}
+
 /** Texto listo para guardar en `messages` (evita volcados de accesibilidad de LinkedIn). */
 function sanitizeForInboxDb(raw: string): string {
   const n = normalizeMsgText(raw);
   if (n.length < 3) return n;
+  let out = n;
   if (looksLikeLinkedInThreadDump(n) || n.length > 900) {
     const extracted = extractLastBubbleFromLinkedInDump(raw);
-    if (extracted.length >= 8) return extracted;
+    if (extracted.length >= 8) out = extracted;
   }
-  return n.slice(0, 8000);
+  out = stripDuplicateLeadingFullName(out);
+  return out.slice(0, 8000);
 }
 
 async function scrollThreadMessageListToBottom(page: Page): Promise<void> {
@@ -806,12 +753,12 @@ function previewFromBubble(b: { text: string; attachments?: ThreadBubbleAttachme
 }
 
 async function extractAllThreadBubblesFromDom(page: Page): Promise<
-  { text: string; direction: "in" | "out"; attachments?: ThreadBubbleAttachment[] }[]
+  { text: string; direction: "in" | "out"; attachments?: ThreadBubbleAttachment[]; eventUrn?: string; isoTimestamp?: string }[]
 > {
-  // IMPORTANTE: page.evaluate con string de arrow function retorna el objeto función (no serializable).
-  // Usar siempre IIFE (function(){ ... })() para que se ejecute y devuelva el valor.
   try {
   const raw = await page.evaluate(`(function() {
+    var REF = new Date();
+
     function norm(s) { return (s == null ? "" : String(s)).replace(/\\s+/g, " ").trim(); }
     function classStr(el) {
       if (!el) return "";
@@ -823,59 +770,149 @@ async function extractAllThreadBubblesFromDom(page: Page): Promise<
     function inConvList(el) {
       return el.closest(".msg-conversations-container__conversations-list, ul.msg-conversations-container__conversations-list") !== null;
     }
-    // DOM real LinkedIn (2025–2026): div.msg-s-event-listitem con data-view-name="message-list-item".
-    // --other = mensaje del contacto (in); sin --other en ese div = mensaje propio (out).
-    function fromSelf(eventListItem) {
-      if (!eventListItem) return false;
-      var cls = classStr(eventListItem);
+    function fromSelf(el) {
+      if (!el) return false;
+      var cls = classStr(el);
       if (cls.indexOf("msg-s-event-listitem--other") >= 0) return false;
       if (/msg-s-event-listitem/.test(cls)) return true;
-      var inner = eventListItem.querySelector(".msg-s-event-listitem");
+      var inner = el.querySelector(".msg-s-event-listitem");
       if (inner && classStr(inner).indexOf("msg-s-event-listitem--other") < 0) return true;
       return false;
     }
     function extractMsgText(eventItem) {
-      // En HTML guardado de LinkedIn el texto va en p.msg-s-event-listitem__body (no __message-body)
-      var bodyEl = eventItem.querySelector(
-        "p.msg-s-event-listitem__body, p.msg-s-event-listitem__message-body, " +
-        "[class*='msg-s-event-listitem__body'], .msg-s-event__content p, " +
-        ".msg-s-event-listitem__message-bubble p, [class*='message-body']"
+      var groupText = eventItem.querySelector(
+        ".msg-s-message-group__message p.msg-s-message-group__text, " +
+        ".msg-s-message-group__message p, p.msg-s-message-group__text"
       );
-      if (bodyEl) return norm(bodyEl.textContent || "");
-      var firstP = eventItem.querySelector(".msg-s-event__content p, .msg-s-event-listitem__message-bubble p");
-      if (firstP) return norm(firstP.textContent || "");
+      if (groupText) return norm(groupText.textContent || "");
+      var bubble = eventItem.querySelector(".msg-s-event-listitem__message-bubble");
+      var scope = bubble || eventItem;
+      var bodyEl = scope.querySelector(
+        "p.msg-s-event-listitem__body, p.msg-s-event-listitem__message-body, [class*='msg-s-event-listitem__body']"
+      );
+      if (bodyEl) {
+        try {
+          var clone = bodyEl.cloneNode(true);
+          clone.querySelectorAll(
+            ".msg-s-message-group__name, a.msg-s-message-group__profile-link, " +
+            "[class*='msg-s-message-group__name'], .msg-s-event-listitem__sender-name"
+          ).forEach(function(n) { n.remove(); });
+          var tx = norm(clone.textContent || "");
+          if (tx.length >= 1) return tx;
+        } catch(e) {}
+        return norm(bodyEl.textContent || "");
+      }
+      var onlyP = scope.querySelector(".msg-s-event-listitem__message-bubble p");
+      if (onlyP) return norm(onlyP.textContent || "");
       return "";
     }
-    // Adjuntos: p.ui-attachment__filename dentro de .msg-s-event-listitem__download-attachment-button / .ui-attachment--pdf|doc|…
     function extractAttachments(eventItem) {
-      var out = [];
-      var seen = {};
+      var out = []; var seen = {};
       var fnameEls = eventItem.querySelectorAll("p.ui-attachment__filename");
       for (var fi = 0; fi < fnameEls.length; fi++) {
         var name = norm(fnameEls[fi].textContent || "");
-        if (name.length < 2) continue;
-        if (seen[name]) continue;
+        if (name.length < 2 || seen[name]) continue;
         seen[name] = true;
         var wrap = fnameEls[fi].closest(".ui-attachment, .msg-s-event-listitem__attachment-type");
         var kind = "";
-        if (wrap) {
-          var m = classStr(wrap).match(/ui-attachment--([a-z0-9_-]+)/i);
-          if (m) kind = m[1];
-        }
+        if (wrap) { var m2 = classStr(wrap).match(/ui-attachment--([a-z0-9_-]+)/i); if (m2) kind = m2[1]; }
         out.push({ name: name.slice(0, 500), kind: kind || undefined });
       }
       return out;
     }
+    function extractEventUrn(el) {
+      var u = el.getAttribute("data-event-urn");
+      if (u) return u;
+      var child = el.querySelector("[data-event-urn]");
+      if (child) return child.getAttribute("data-event-urn");
+      return null;
+    }
 
-    // 1. Buscar el contenedor raíz del hilo de mensajes (NO la lista de conversaciones)
+    // ── Parseo de fecha desde el encabezado separador de día ──────────────────
+    // Formatos observados: "19 mar", "8 oct 2025", "1 nov 2025", "ayer", "hoy", "today", "yesterday"
+    var MONTHS = {ene:0,feb:1,mar:2,abr:3,may:4,jun:5,jul:6,ago:7,sep:8,oct:9,nov:10,dic:11,
+                  jan:0,apr:3,aug:7,dec:11};
+    function parseDateHeading(text) {
+      var t = norm(text).toLowerCase().replace(/\\./g,"");
+      if (!t) return null;
+      if (t === "hoy" || t === "today") {
+        return new Date(REF.getFullYear(), REF.getMonth(), REF.getDate());
+      }
+      if (t === "ayer" || t === "yesterday") {
+        var d = new Date(REF.getFullYear(), REF.getMonth(), REF.getDate());
+        d.setDate(d.getDate() - 1);
+        return d;
+      }
+      // "8 oct 2025" / "19 mar" / "19 de mar"
+      var m = t.match(/(\\d{1,2})\\s+(?:de\\s+)?([a-záéíóú]{3,})(?:\\s+(\\d{4}))?/);
+      if (m) {
+        var day = parseInt(m[1], 10);
+        var monKey = m[2].normalize ? m[2].normalize("NFD").replace(/[\\u0300-\\u036f]/g,"").slice(0,3) : m[2].slice(0,3);
+        var mon = MONTHS[monKey];
+        if (mon === undefined) return null;
+        var yr = m[3] ? parseInt(m[3], 10) : REF.getFullYear();
+        var d2 = new Date(yr, mon, day, 0, 0, 0, 0);
+        // Sin año explícito: si la fecha resultante es más de 1 día en el futuro → año anterior
+        if (!m[3] && d2.getTime() > REF.getTime() + 86400000) {
+          d2 = new Date(yr - 1, mon, day, 0, 0, 0, 0);
+        }
+        return isNaN(d2.getTime()) ? null : d2;
+      }
+      return null;
+    }
+
+    // ── Parseo de hora desde el timestamp del grupo de mensajes ───────────────
+    // Formatos observados: "19:55", "9:30", "9:30 a. m.", "11:49 p. m."
+    function parseGroupTime(text, baseDate) {
+      if (!baseDate) return null;
+      var t = norm(text);
+      var m = t.match(/(\\d{1,2}):(\\d{2})(?:[\\s\\u00a0]*([ap])\\.?\\s*m\\.?)?/i);
+      if (!m) return null;
+      var h = parseInt(m[1], 10);
+      var min = parseInt(m[2], 10);
+      var ampm = m[3] ? m[3].toLowerCase() : null;
+      if (ampm === "p" && h < 12) h += 12;
+      if (ampm === "a" && h === 12) h = 0;
+      var d = new Date(baseDate.getTime());
+      d.setHours(h, min, 0, 0);
+      return d;
+    }
+
+    // ISO desde atributo datetime de <time> (LinkedIn suele exponer instante real aquí)
+    function isoFromTimeElement(el) {
+      if (!el) return null;
+      var raw = el.getAttribute("datetime");
+      if (!raw || !String(raw).trim()) return null;
+      var d = new Date(String(raw).trim());
+      if (isNaN(d.getTime())) return null;
+      return d.toISOString();
+    }
+    function parseHeadingEl(headingEl) {
+      if (!headingEl) return null;
+      var iso = isoFromTimeElement(headingEl);
+      if (iso) return new Date(iso);
+      return parseDateHeading(norm(headingEl.textContent));
+    }
+    // Fecha de día del último separador que en el árbol va ANTES de este mensaje (evita que todo quede en «hoy»)
+    function baseDateBeforeItem(rootEl, itemEl) {
+      var heads = rootEl.querySelectorAll(
+        "time.msg-s-message-list__time-heading, time[class*='msg-s-message-list__time-heading']"
+      );
+      var best = null;
+      for (var hi = 0; hi < heads.length; hi++) {
+        var h = heads[hi];
+        if (inConvList(h)) continue;
+        if (itemEl.compareDocumentPosition(h) & 2) best = h;
+      }
+      if (!best) return null;
+      return parseHeadingEl(best);
+    }
+
+    // ── Buscar raíz del hilo ──────────────────────────────────────────────────
     var threadRoots = [
-      ".msg-s-message-list-container",
-      "ul.msg-s-message-list",
-      ".msg-s-message-list",
-      "[data-view-name='message-thread-scroll-container']",
-      "[data-view-name='message-pane']",
-      ".scaffold-layout__detail",
-      ".msg-thread"
+      ".msg-s-message-list-container", "ul.msg-s-message-list", ".msg-s-message-list",
+      "[data-view-name='message-thread-scroll-container']", "[data-view-name='message-pane']",
+      ".scaffold-layout__detail", ".msg-thread"
     ];
     var root = null;
     for (var ri = 0; ri < threadRoots.length; ri++) {
@@ -883,62 +920,165 @@ async function extractAllThreadBubblesFromDom(page: Page): Promise<
       if (r && !inConvList(r)) { root = r; break; }
     }
     if (!root) {
-      var detailInner = document.querySelector(".scaffold-layout__detail-inner");
-      root = (detailInner && !inConvList(detailInner)) ? detailInner : null;
+      var di = document.querySelector(".scaffold-layout__detail-inner");
+      root = (di && !inConvList(di)) ? di : null;
     }
-    // Fallback solo si ningún contenedor específico fue encontrado
     if (!root) root = document.querySelector("main") || document.body;
 
-    // 2. Ítems de mensaje: priorizar data-view-name="message-list-item" (coincide con HTML exportado)
-    var itemSelectors = [
-      "[data-view-name='message-list-item'].msg-s-event-listitem",
-      "div.msg-s-event-listitem[data-view-name='message-list-item']",
-      "[data-view-name='message-list-item']",
-      "li.msg-s-message-list__event",
-      "li[class*='msg-s-message-list__event']",
-      ".msg-s-event-listitem",
-      "[data-view-name='message-list-item-event']",
-      "[data-view-name='message-event']"
-    ];
-    var items = [];
-    for (var si = 0; si < itemSelectors.length; si++) {
-      var found = Array.prototype.slice.call(root.querySelectorAll(itemSelectors[si])).filter(function(el) { return !inConvList(el); });
-      if (found.length > 0) { items = found; break; }
-    }
+    // ── Recorrer li.msg-s-message-list__event en orden del documento ──────────
+    // Cada li puede contener:
+    //   - time.msg-s-message-list__time-heading  → actualiza fecha de contexto
+    //   - uno o más div.msg-s-event-listitem     → cada uno tiene time.msg-s-message-group__timestamp
+    var liElements = Array.prototype.slice.call(
+      root.querySelectorAll("li.msg-s-message-list__event, li[class*='msg-s-message-list__event']")
+    ).filter(function(el) { return !inConvList(el); });
 
-    // 3. Si no se encontraron ítems con selectores específicos, buscar por estructura
-    if (items.length === 0) {
-      // Buscar li o div que contengan p con texto de mensaje o adjunto
-      items = Array.prototype.slice.call(root.querySelectorAll("li, div[class*='event'], div[class*='message']")).filter(function(el) {
-        if (inConvList(el)) return false;
-        if (el.querySelector("p.ui-attachment__filename")) return true;
-        var ps = el.querySelectorAll("p");
-        for (var pi = 0; pi < ps.length; pi++) {
-          if (norm(ps[pi].textContent || "").length >= 3) return true;
-        }
-        return false;
-      });
-    }
-
-    // 4. Texto, adjuntos y dirección (no deduplicar por texto)
+    var currentDate = null;  // Date — fecha de contexto actual (del último separador)
+    var lastGroupTime = null; // String "HH:MM" del último timestamp visto (por si el siguiente item comparte hora)
     var out = [];
-    for (var i = 0; i < items.length; i++) {
-      var item = items[i];
-      var bubbleRoot = item.matches && item.matches(".msg-s-event-listitem") ? item : item.querySelector(".msg-s-event-listitem");
-      var t = extractMsgText(item);
-      var atts = extractAttachments(item);
-      if (t.length < 2 && atts.length === 0) continue;
-      var self = fromSelf(bubbleRoot || item);
-      out.push({
-        text: t.slice(0, 8000),
-        direction: self ? "out" : "in",
-        attachments: atts.length ? atts : undefined
-      });
+
+    // Extrae hora de texto como "ha enviado el siguiente mensaje a las 19:55" → "19:55"
+    function extractTimeFromA11y(el) {
+      var span = el.querySelector("span.msg-s-event-listitem--group-a11y-heading, [class*='msg-s-event-listitem--group-a11y-heading']");
+      if (!span) {
+        // Buscar también como hermano anterior en el li padre
+        var parent = el.parentElement;
+        if (parent) span = parent.querySelector("span.msg-s-event-listitem--group-a11y-heading, [class*='msg-s-event-listitem--group-a11y-heading']");
+      }
+      if (!span) return null;
+      var txt = norm(span.textContent);
+      var m = txt.match(/(\d{1,2}:\d{2})/);
+      return m ? m[1] : null;
     }
+
+    // Si no tenemos fecha del encabezado, intentar extraer desde el primer <time> del hilo completo
+    function tryExtractInitialDate() {
+      var allHeadings = Array.prototype.slice.call(
+        root.querySelectorAll("time.msg-s-message-list__time-heading, time[class*='msg-s-message-list__time-heading']")
+      ).filter(function(el) { return !inConvList(el); });
+      if (allHeadings.length > 0) {
+        var parsed = parseHeadingEl(allHeadings[0]);
+        if (parsed) return parsed;
+      }
+      return null;
+    }
+
+    // Si hay li elements, usar enfoque estructurado (más preciso)
+    if (liElements.length > 0) {
+      for (var li = 0; li < liElements.length; li++) {
+        var liEl = liElements[li];
+
+        // ¿Tiene encabezado de fecha?
+        var headingEl = liEl.querySelector("time.msg-s-message-list__time-heading, time[class*='msg-s-message-list__time-heading']");
+        if (headingEl) {
+          var parsed = parseHeadingEl(headingEl);
+          if (parsed) currentDate = parsed;
+        }
+        // Si aún no tenemos fecha (primer li sin encabezado), intentar buscarlo globalmente
+        if (!currentDate) currentDate = tryExtractInitialDate();
+
+        // Todos los div.msg-s-event-listitem dentro de este li (excluyendo anidados en sublistas)
+        var eventItems = Array.prototype.slice.call(
+          liEl.querySelectorAll("div.msg-s-event-listitem, [data-view-name='message-list-item']")
+        ).filter(function(el) {
+          return !inConvList(el) && classStr(el).indexOf("msg-s-event-listitem--group-a11y-heading") < 0;
+        });
+
+        for (var ei = 0; ei < eventItems.length; ei++) {
+          var item = eventItems[ei];
+          var t = extractMsgText(item);
+          var atts = extractAttachments(item);
+          if (t.length < 2 && atts.length === 0) continue;
+
+          // Timestamp: clase conocida, o cualquier <time datetime> dentro del item
+          var tsEl = item.querySelector("time.msg-s-message-group__timestamp, time[class*='msg-s-message-group__timestamp']");
+          if (!tsEl) {
+            var tc = item.querySelector("time[datetime]");
+            if (tc) tsEl = tc;
+          }
+          var timeText = tsEl ? norm(tsEl.textContent) : null;
+          // Fallback: extraer hora del span de accesibilidad del li
+          if (!timeText) timeText = extractTimeFromA11y(item);
+          // Fallback: reusar el último tiempo visto en el mismo contexto de fecha
+          if (!timeText && lastGroupTime) timeText = lastGroupTime;
+          if (timeText) lastGroupTime = timeText;
+
+          var baseForBubble = baseDateBeforeItem(root, item) || currentDate || tryExtractInitialDate();
+          var isoTs = tsEl ? isoFromTimeElement(tsEl) : null;
+          if (!isoTs && timeText && baseForBubble) {
+            var tsDate = parseGroupTime(timeText, baseForBubble);
+            if (tsDate) isoTs = tsDate.toISOString();
+          }
+
+          var self = fromSelf(item);
+          var urn = extractEventUrn(item);
+          out.push({
+            text: t.slice(0, 8000),
+            direction: self ? "out" : "in",
+            attachments: atts.length ? atts : undefined,
+            eventUrn: urn || undefined,
+            isoTimestamp: isoTs || null,
+          });
+        }
+      }
+    }
+
+    // Fallback: sin li estructurados, buscar items directamente
+    if (out.length === 0) {
+      var itemSelectors = [
+        "[data-view-name='message-list-item'].msg-s-event-listitem",
+        "div.msg-s-event-listitem[data-view-name='message-list-item']",
+        "[data-view-name='message-list-item']",
+        ".msg-s-event-listitem",
+        "[data-view-name='message-list-item-event']"
+      ];
+      var items = [];
+      for (var si = 0; si < itemSelectors.length; si++) {
+        var found = Array.prototype.slice.call(root.querySelectorAll(itemSelectors[si])).filter(function(el) { return !inConvList(el); });
+        if (found.length > 0) { items = found; break; }
+      }
+      // Intentar extraer fecha del contexto global para el fallback
+      var fbDate = currentDate || tryExtractInitialDate();
+      var fbLastTime = null;
+      for (var ii = 0; ii < items.length; ii++) {
+        var item2 = items[ii];
+        var bubbleRoot = item2.matches && item2.matches(".msg-s-event-listitem") ? item2 : item2.querySelector(".msg-s-event-listitem");
+        var t2 = extractMsgText(item2);
+        var atts2 = extractAttachments(item2);
+        if (t2.length < 2 && atts2.length === 0) continue;
+        var self2 = fromSelf(bubbleRoot || item2);
+        var urn2 = extractEventUrn(item2);
+        // Intentar timestamp en fallback también
+        var tsEl2 = item2.querySelector("time.msg-s-message-group__timestamp, time[class*='msg-s-message-group__timestamp']");
+        if (!tsEl2) {
+          var tc2 = item2.querySelector("time[datetime]");
+          if (tc2) tsEl2 = tc2;
+        }
+        var timeText2 = tsEl2 ? norm(tsEl2.textContent) : null;
+        if (!timeText2) timeText2 = extractTimeFromA11y(item2);
+        if (!timeText2 && fbLastTime) timeText2 = fbLastTime;
+        if (timeText2) fbLastTime = timeText2;
+        var baseFor2 = baseDateBeforeItem(root, item2) || fbDate;
+        var isoTs2 = tsEl2 ? isoFromTimeElement(tsEl2) : null;
+        if (!isoTs2 && timeText2 && baseFor2) {
+          var tsDate2 = parseGroupTime(timeText2, baseFor2);
+          if (tsDate2) isoTs2 = tsDate2.toISOString();
+        }
+        out.push({
+          text: t2.slice(0, 8000),
+          direction: self2 ? "out" : "in",
+          attachments: atts2.length ? atts2 : undefined,
+          eventUrn: urn2 || undefined,
+          isoTimestamp: isoTs2 || null,
+        });
+      }
+    }
+
     return out;
   })()`);
   return Array.isArray(raw)
-    ? (raw as { text: string; direction: "in" | "out"; attachments?: ThreadBubbleAttachment[] }[])
+    ? (raw as { text: string; direction: "in" | "out"; attachments?: ThreadBubbleAttachment[]; eventUrn?: string; isoTimestamp?: string }[])
+        .map((b) => ({ ...b, isoTimestamp: b.isoTimestamp ?? undefined }))
     : [];
   } catch (e) {
     console.warn("[inbox_thread_sync] extractAllThreadBubblesFromDom:", e instanceof Error ? e.message : String(e));
@@ -985,7 +1125,16 @@ async function runMessagingThreadSync(
   await scrollThreadMessageListLoadOlder(page);
   await new Promise((r) => setTimeout(r, inboxEnvInt("INBOX_THREAD_DOM_SETTLE_MS", 1500)));
   let bubbles = await extractAllThreadBubblesFromDom(page);
-  console.log(`[inbox_thread_sync] thread=${conversationId.slice(0, 14)}… burbujas_intento1=${bubbles.length}`);
+  // Diagnóstico de timestamps — siempre loguear para poder depurar
+  const tsDbg = await page.evaluate(`(function() {
+    var liCount = document.querySelectorAll("li.msg-s-message-list__event").length;
+    var headings = Array.prototype.slice.call(document.querySelectorAll("time.msg-s-message-list__time-heading")).map(function(el){ return el.textContent.trim(); }).slice(0,3);
+    var groupTs = Array.prototype.slice.call(document.querySelectorAll("time.msg-s-message-group__timestamp")).map(function(el){ return el.textContent.trim(); }).slice(0,3);
+    var urns = document.querySelectorAll("[data-event-urn]").length;
+    return { liCount: liCount, headings: headings, groupTs: groupTs, urns: urns };
+  })()`).catch(() => null);
+  const withTs = bubbles.filter((b) => b.isoTimestamp).length;
+  console.log(`[inbox_thread_sync] thread=${conversationId.slice(0, 14)}… burbujas_intento1=${bubbles.length} withTs=${withTs}/${bubbles.length}`, JSON.stringify(tsDbg));
   if (bubbles.length < 2) {
     // Diagnóstico: listar qué contenedores y elementos existen en el DOM del hilo
     const dbgInfo = await page.evaluate(`(function() {
@@ -1031,14 +1180,69 @@ async function runMessagingThreadSync(
     list_preview: listPreview,
   });
 
-  const baseTs = Date.now() - Math.max(0, bubbles.length - 1) * inboxEnvInt("INBOX_THREAD_MESSAGE_STEP_MS", 60_000);
-  const stepMs = inboxEnvInt("INBOX_THREAD_MESSAGE_STEP_MS", 60_000);
+  // ── Cargar mensajes existentes para preservar timestamps en re-syncs ─────────
+  const { data: existingMsgs } = await sb
+    .from("messages")
+    .select("id, event_urn, message_text, direction, created_at")
+    .eq("account_id", accountId)
+    .eq("conversation_id", conversationId)
+    .order("created_at", { ascending: true });
+
+  // Mapa de preservación: clave = "direction:text[:200]" → ISO timestamp existente
+  // Usamos una lista ordenada para consumir matcheos en orden (evitar asignar el mismo ts a 2 mensajes iguales)
+  type ExistingEntry = { created_at: string; used: boolean };
+  const existingByKey: Map<string, ExistingEntry[]> = new Map();
+  for (const m of existingMsgs ?? []) {
+    if (!m.created_at) continue;
+    const key = `${m.direction}:${((m.message_text as string) ?? "").slice(0, 200)}`;
+    const arr = existingByKey.get(key) ?? [];
+    arr.push({ created_at: m.created_at as string, used: false });
+    existingByKey.set(key, arr);
+  }
+  const existingByUrn: Map<string, string> = new Map();
+  for (const m of existingMsgs ?? []) {
+    if (m.event_urn && m.created_at) existingByUrn.set(m.event_urn as string, m.created_at as string);
+  }
+
+  function consumeExistingTs(urn: string | null | undefined, direction: string, text: string | null): string | null {
+    if (urn && existingByUrn.has(urn)) return existingByUrn.get(urn)!;
+    const key = `${direction}:${(text ?? "").slice(0, 200)}`;
+    const arr = existingByKey.get(key);
+    if (!arr) return null;
+    const entry = arr.find((e) => !e.used);
+    if (entry) { entry.used = true; return entry.created_at; }
+    return null;
+  }
+
+  // ── Asignar timestamps reales extraídos del DOM ──────────────────────────────
+  const realTimestamps = bubbles.map((b) => b.isoTimestamp).filter(Boolean) as string[];
+  const hasRealTs = realTimestamps.length > 0;
+  const hasExisting = (existingMsgs?.length ?? 0) > 0;
+
+  // Anchor para timestamps sintéticos: si ya hay mensajes en DB, usar el más antiguo.
+  // Si no, usar ahora − N minutos (primer sync).
+  const existingOldestMs = hasExisting
+    ? Math.min(...(existingMsgs!.map((m) => new Date(m.created_at as string).getTime())))
+    : null;
+  const anchorMs = realTimestamps.length > 0
+    ? Math.min(...realTimestamps.map((s) => new Date(s).getTime()))
+    : existingOldestMs ?? Date.now() - Math.max(0, bubbles.length - 1) * 60_000;
+
+  let syntheticIdx = 0;
   const rows = bubbles
-    .map((b, idx) => {
+    .map((b) => {
       const text = sanitizeForInboxDb(b?.text).trim();
       const attachments =
         Array.isArray(b.attachments) && b.attachments.length > 0 ? b.attachments : null;
       if (!text && !attachments?.length) return null;
+      // Prioridad: 1) ya guardado (evita que un DOM ambiguo «hoy» pise el valor en cada sync)
+      //            2) DOM (datetime / encabezado por mensaje)
+      //            3) sintético anclado
+      const existingTs = consumeExistingTs(b.eventUrn, b.direction, text || null);
+      const created_at =
+        existingTs ??
+        b.isoTimestamp ??
+        new Date(anchorMs + syntheticIdx++ * 60_000).toISOString();
       return {
         account_id: accountId,
         conversation_id: conversationId,
@@ -1047,30 +1251,35 @@ async function runMessagingThreadSync(
         direction: b.direction,
         peer_name: peerName,
         peer_photo_url: peerPhotoUrl,
-        created_at: new Date(baseTs + idx * stepMs).toISOString(),
+        event_urn: b.eventUrn ?? null,
+        created_at,
       };
     })
     .filter(Boolean) as Record<string, unknown>[];
 
   if (rows.length === 0) {
-    console.warn(
-      `[inbox_thread_sync] thread=${conversationId.slice(0, 12)}… sin burbujas persistibles; se mantiene messages existente`
-    );
+    console.warn(`[inbox_thread_sync] thread=${conversationId.slice(0, 12)}… sin burbujas persistibles`);
     return;
   }
 
-  const { error: delErr } = await sb.from("messages").delete().eq("account_id", accountId).eq("conversation_id", conversationId);
-  if (delErr) {
-    console.error("[inbox_thread_sync] delete messages:", delErr.message);
-    throw new Error(delErr.message);
-  }
+  const allHaveUrn = bubbles.every((b) => !!b.eventUrn) && bubbles.length > 0;
 
-  const { error: insErr } = await sb.from("messages").insert(rows);
-  if (insErr) {
-    console.error("[inbox_thread_sync] insert messages:", insErr.message);
-    throw new Error(insErr.message);
+  if (allHaveUrn) {
+    // Todos tienen URN → upsert por event_urn, ignorar duplicados (preserva created_at)
+    const { error: upsertErr } = await sb
+      .from("messages")
+      .upsert(rows, { onConflict: "account_id,event_urn", ignoreDuplicates: true });
+    if (upsertErr) { console.error("[inbox_thread_sync] upsert:", upsertErr.message); throw new Error(upsertErr.message); }
+    console.log(`[inbox_thread_sync] thread=${conversationId.slice(0, 12)}… upsert(urn) n=${rows.length} realTs=${hasRealTs}`);
+  } else {
+    // Sin URNs → delete+insert con timestamps preservados o reales
+    const { error: delErr } = await sb.from("messages").delete()
+      .eq("account_id", accountId).eq("conversation_id", conversationId);
+    if (delErr) { console.error("[inbox_thread_sync] delete:", delErr.message); throw new Error(delErr.message); }
+    const { error: insErr } = await sb.from("messages").insert(rows);
+    if (insErr) { console.error("[inbox_thread_sync] insert:", insErr.message); throw new Error(insErr.message); }
+    console.log(`[inbox_thread_sync] thread=${conversationId.slice(0, 12)}… insert n=${rows.length} realTs=${hasRealTs} preserved=${hasExisting}`);
   }
-  console.log(`[inbox_thread_sync] thread=${conversationId.slice(0, 12)}… burbujas=${rows.length}`);
 
   if (!opts.keywordsAutoReply || !rows.length) return;
   const { data: rulesRaw } = await sb
@@ -1339,160 +1548,7 @@ async function clickConvRow(page: Page, rowSelector: string, rowIndex: number): 
   return true;
 }
 
-// ─── Voyager API inbox sync ────────────────────────────────────────────────
-
-/** Construye URL de foto desde VectorImage de LinkedIn Voyager. */
-function buildVoyagerPhotoUrl(pic: unknown): string | null {
-  if (!pic || typeof pic !== "object") return null;
-  const p = pic as Record<string, unknown>;
-  const vi =
-    (p["com.linkedin.common.VectorImage"] as Record<string, unknown> | undefined) ??
-    (typeof p.rootUrl === "string" ? p : null);
-  if (!vi) return null;
-  const root = typeof vi.rootUrl === "string" ? vi.rootUrl : null;
-  const arts = vi.artifacts as Array<Record<string, unknown>> | undefined;
-  if (!root || !Array.isArray(arts) || !arts.length) return null;
-  const best = [...arts].sort((a, b) => (Number(b.width) || 0) - (Number(a.width) || 0))[0];
-  const seg = best?.fileIdentifyingUrlPathSegment;
-  if (typeof seg !== "string" || !seg) return null;
-  return root.endsWith("/") ? `${root}${seg}` : `${root}/${seg}`;
-}
-
-/** Extrae conversationId (segmento de /messaging/thread/<id>/) desde un URN de Voyager. */
-function voyagerUrnToThreadId(urn: string): string | null {
-  if (!urn) return null;
-  // Formato tuple: urn:li:msg_conversation:(urn:li:fsd_profile:...,2-abc=) → "2-abc="
-  const tupleM = urn.match(/,([^,)]+)\)$/);
-  if (tupleM?.[1]) {
-    try { return decodeURIComponent(tupleM[1]); } catch { return tupleM[1]; }
-  }
-  // Formato directo: urn:li:thread:2-abc= → "2-abc="
-  const simpleM = urn.match(/urn:li:(?:thread|msg_thread):(.+)$/);
-  if (simpleM?.[1]) return simpleM[1];
-  return null;
-}
-
-/** Parsea MiniProfile de LinkedIn Voyager. */
-function parseMiniProfileVoyager(mp: unknown): { name: string | null; photoUrl: string | null } {
-  if (!mp || typeof mp !== "object") return { name: null, photoUrl: null };
-  const o = mp as Record<string, unknown>;
-  const fn = typeof o.firstName === "string" ? o.firstName.trim() : "";
-  const ln = typeof o.lastName === "string" ? o.lastName.trim() : "";
-  const name = [fn, ln].filter(Boolean).join(" ") || null;
-  const photoUrl = buildVoyagerPhotoUrl(o.picture) ?? buildVoyagerPhotoUrl(o.profilePicture);
-  return { name, photoUrl };
-}
-
-/**
- * Parsea respuesta de /voyager/api/messaging/conversations.
- * Maneja formato normalized (included) e inline (elements).
- */
-function parseVoyagerConversationList(body: unknown, maxRows: number): InboxListRow[] {
-  if (!body || typeof body !== "object") return [];
-  const b = body as Record<string, unknown>;
-
-  const candidates: unknown[] = [];
-  // Formato 1: included con $type que contiene "Conversation"
-  if (Array.isArray(b.included)) {
-    for (const item of b.included) {
-      if (!item || typeof item !== "object") continue;
-      const o = item as Record<string, unknown>;
-      if (String(o.$type ?? "").toLowerCase().includes("conversation") && typeof o.entityUrn === "string") {
-        candidates.push(item);
-      }
-    }
-  }
-  // Formato 2: b.elements directos
-  if (!candidates.length && Array.isArray(b.elements)) {
-    for (const item of b.elements) { if (item && typeof item === "object") candidates.push(item); }
-  }
-  // Formato 3: b.data.elements
-  if (!candidates.length) {
-    const data = b.data as Record<string, unknown> | undefined;
-    if (data && Array.isArray(data.elements)) {
-      for (const item of data.elements) { if (item && typeof item === "object") candidates.push(item); }
-    }
-  }
-
-  // Índice de included por URN para resolver referencias
-  const includedByUrn = new Map<string, Record<string, unknown>>();
-  if (Array.isArray(b.included)) {
-    for (const item of b.included) {
-      if (!item || typeof item !== "object") continue;
-      const o = item as Record<string, unknown>;
-      if (typeof o.entityUrn === "string") includedByUrn.set(o.entityUrn, o);
-      if (typeof o.$id === "string") includedByUrn.set(o.$id, o);
-    }
-  }
-
-  const rows: InboxListRow[] = [];
-  for (const conv of candidates) {
-    if (rows.length >= maxRows) break;
-    const c = conv as Record<string, unknown>;
-
-    // conversationId desde conversationId directo o URN
-    const rawUrn = String(c.entityUrn ?? "");
-    let conversationId = typeof c.conversationId === "string" ? c.conversationId : voyagerUrnToThreadId(rawUrn);
-    if (!conversationId && rawUrn) {
-      const m = rawUrn.match(/(2-[A-Za-z0-9+/=_-]+)/);
-      if (m?.[1]) conversationId = m[1];
-    }
-    if (!conversationId) continue;
-
-    // Timestamp real
-    const lastActivityAt = Number(c.lastActivityAt ?? c.lastSeenAt ?? 0);
-    const lastActivityAtIso = lastActivityAt > 0 ? new Date(lastActivityAt).toISOString() : null;
-
-    // Participantes → nombre y foto del peer
-    let peerName: string | null = null;
-    let peerPhotoUrl: string | null = null;
-    const participantsRaw = c.participants;
-    const participantsList: unknown[] = Array.isArray(participantsRaw)
-      ? participantsRaw
-      : Array.isArray((participantsRaw as Record<string, unknown> | undefined)?.elements)
-        ? ((participantsRaw as Record<string, unknown>).elements as unknown[])
-        : [];
-    for (const p of participantsList) {
-      if (!p || typeof p !== "object") continue;
-      const pm = p as Record<string, unknown>;
-      let mp: unknown = pm.miniProfile;
-      if (!mp && typeof pm.entityUrn === "string") {
-        const res = includedByUrn.get(pm.entityUrn);
-        if (res) mp = res.miniProfile ?? res;
-      }
-      if (!mp && typeof pm.firstName === "string") mp = pm;
-      const parsed = parseMiniProfileVoyager(mp);
-      if (parsed.name) peerName = parsed.name;
-      if (parsed.photoUrl) peerPhotoUrl = parsed.photoUrl;
-      if (peerName) break;
-    }
-
-    // Preview del último evento/mensaje
-    let preview = "—";
-    const eventsRaw = c.events ?? c.messages;
-    const eventsList: unknown[] = Array.isArray(eventsRaw)
-      ? eventsRaw
-      : Array.isArray((eventsRaw as Record<string, unknown> | undefined)?.elements)
-        ? ((eventsRaw as Record<string, unknown>).elements as unknown[])
-        : [];
-    const lastEvent = eventsList.length ? eventsList[eventsList.length - 1] : null;
-    if (lastEvent && typeof lastEvent === "object") {
-      const ev = lastEvent as Record<string, unknown>;
-      const content = ev.eventContent ?? ev.messageBody;
-      if (content && typeof content === "object") {
-        const bd = (content as Record<string, unknown>).attributedBody ?? (content as Record<string, unknown>).body;
-        if (bd && typeof bd === "object") {
-          const text = String((bd as Record<string, unknown>).text ?? "").trim();
-          if (text) preview = text.slice(0, 300);
-        }
-      }
-      if (preview === "—" && typeof ev.body === "string") preview = ev.body.slice(0, 300);
-    }
-
-    rows.push({ conversationId, peerName, preview, peerPhotoUrl, lastActivityAtIso });
-  }
-  return rows;
-}
+// ─── Voyager API inbox sync (parse compartido en lib/voyagerMessagingParse) ─
 
 /** Fetch de una página de conversaciones via Voyager API (ejecutado dentro del browser context). */
 async function fetchVoyagerConversationPage(
@@ -1914,9 +1970,8 @@ async function recoverStaleRunningTasks(sb: SupabaseClient, redis: RedisClient):
   const pollStaleSec = Number(process.env.TASK_STALE_POLL_RUNNING_SEC ?? 120);
   if (Number.isFinite(pollStaleSec) && pollStaleSec >= 30) {
     const pollIso = new Date(Date.now() - pollStaleSec * 1000).toISOString();
-    // Solo poll_comments y poll_messages tienen timeout corto (120s).
-    // sync_inbox y sync_inbox_thread son de larga duración — usan el timeout de 45 min.
-    const shortStaleActions = ["poll_comments", "poll_messages", "verify_session", "session_check"];
+    // poll_comments tiene timeout corto (p. ej. POLL_TASK_TIMEOUT_MS). sync_inbox / sync_inbox_thread son largas.
+    const shortStaleActions = ["poll_comments", "verify_session", "session_check"];
     const { data: pa, error: pe1 } = await sb
       .from("tasks")
       .update({ ...payload, error_message: "requeued_stale_poll" as const })
@@ -2260,6 +2315,42 @@ export async function runOneTask(sb: SupabaseClient, redis: RedisClient, taskId:
     return;
   }
 
+  if (action === "sync_inbox") {
+    const httpOff = (process.env.INBOX_SYNC_TRY_HTTP_FIRST ?? "true").toLowerCase();
+    if (httpOff !== "false" && httpOff !== "0") {
+      const requireProxy = process.env.REQUIRE_PROXY === "true";
+      let proxyIdEarly = account.proxy_id as string | null;
+      let proxyRowEarly = proxyIdEarly ? await loadProxy(sb, proxyIdEarly) : null;
+      if (!proxyRowEarly) {
+        const np = await pickProxyForAccount(sb, account.user_id as string, accountId, proxyIdEarly).catch(() => null);
+        if (np) {
+          proxyIdEarly = np;
+          proxyRowEarly = await loadProxy(sb, np);
+        }
+      }
+      if (!requireProxy || proxyRowEarly) {
+        const maxThreads = inboxSyncMaxThreads();
+        const httpTry = await trySyncInboxListHttp(sb, accountId, liAt, maxThreads, proxyRowEarly);
+        if (httpTry.ok) {
+          if (proxyIdEarly) await markProxyUsed(sb, proxyIdEarly);
+          await completeTask(sb, redis, taskId);
+          const enrollmentId = task.enrollment_id as string | undefined;
+          if (enrollmentId) {
+            try {
+              await advanceEnrollmentAfterStep(sb, redis, enrollmentId);
+            } catch (advErr) {
+              console.error(
+                `[worker] advanceEnrollmentAfterStep(${enrollmentId.slice(0, 8)}) falló:`,
+                advErr instanceof Error ? advErr.message : advErr
+              );
+            }
+          }
+          return;
+        }
+      }
+    }
+  }
+
   // acquireBrowserSlot fuera del try/finally: si Redis falla aquí el slot no se corrompe
   // (nunca se incrementó), pero la tarea quedaría "running". Por eso capturamos el error
   // y tratamos una excepción igual que gotSlot=false: reprogramar sin gastar un intento.
@@ -2367,7 +2458,6 @@ export async function runOneTask(sb: SupabaseClient, redis: RedisClient, taskId:
     }
 
     const messagingSessionActions = new Set([
-      "poll_messages",
       "poll_comments",
       "reply_dm",
       "sync_inbox",
@@ -2912,21 +3002,6 @@ export async function runOneTask(sb: SupabaseClient, redis: RedisClient, taskId:
         })
         .eq("id", postId);
       await afterSuccess();
-      return;
-    }
-
-    if (action === "poll_messages") {
-      const maxThreads = inboxPollMessagesMaxThreads();
-      const pollMs = inboxPollMessagesPollMs(maxThreads);
-      try {
-        await runPollWithTimeout(async () => {
-          await runMessagingInboxSync(page, sb, accountId, account.user_id as string, { maxThreads });
-          await completeTask(sb, redis, taskId);
-        }, pollMs, "poll_messages");
-      } catch (e) {
-        const msg = e instanceof Error ? e.message : String(e);
-        await fail(msg.slice(0, 500));
-      }
       return;
     }
 

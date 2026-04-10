@@ -189,7 +189,7 @@ export default function PostDetailPage() {
             {photo ? (
               <img src={photo} alt={name} className="h-10 w-10 shrink-0 rounded-full object-cover ring-1 ring-[var(--border)]" />
             ) : (
-              <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-[color-mix(in_srgb,var(--accent)_18%,var(--surface))] text-sm font-bold text-[var(--accent)] ring-1 ring-[var(--border)]">
+              <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-[color-mix(in_srgb,var(--accent)_18%,transparent)] text-sm font-bold text-[var(--accent)] ring-1 ring-[var(--border)]">
                 {initial}
               </div>
             )}
@@ -198,10 +198,10 @@ export default function PostDetailPage() {
               {account?.li_headline && <p className="truncate text-[11px] text-[var(--muted)]">{account.li_headline}</p>}
             </div>
             <span className={`shrink-0 rounded-full border px-2.5 py-0.5 text-[11px] font-semibold uppercase tracking-wide ${
-              post.status === "draft"     ? "border-[color-mix(in_srgb,var(--muted)_40%,var(--border))] bg-[color-mix(in_srgb,var(--text)_8%,var(--surface))] text-[var(--muted)]" :
-              post.status === "scheduled" ? "border-[color-mix(in_srgb,var(--accent)_45%,var(--border))] bg-[color-mix(in_srgb,var(--accent)_14%,var(--surface))] text-[var(--accent)]" :
-              post.status === "published" ? "border-[color-mix(in_srgb,#22c55e_40%,var(--border))] bg-[color-mix(in_srgb,#22c55e_14%,var(--surface))] text-[#86efac]" :
-              "border-[color-mix(in_srgb,#f87171_45%,var(--border))] bg-[color-mix(in_srgb,#ef4444_12%,var(--surface))] text-[#fca5a5]"
+              post.status === "draft"     ? "border-[color-mix(in_srgb,var(--muted)_40%,var(--border))] bg-[color-mix(in_srgb,var(--text)_8%,transparent)] text-[var(--muted)]" :
+              post.status === "scheduled" ? "border-[color-mix(in_srgb,var(--accent)_45%,var(--border))] bg-[color-mix(in_srgb,var(--accent)_14%,transparent)] text-[var(--accent)]" :
+              post.status === "published" ? "border-[color-mix(in_srgb,#22c55e_40%,var(--border))] bg-[color-mix(in_srgb,#22c55e_14%,transparent)] text-[#86efac]" :
+              "border-[color-mix(in_srgb,#f87171_45%,var(--border))] bg-[color-mix(in_srgb,#ef4444_12%,transparent)] text-[#fca5a5]"
             }`}>
               {post.status === "draft" ? "Borrador" : post.status === "scheduled" ? "Programado" : post.status === "published" ? "Publicado" : "Error"}
             </span>

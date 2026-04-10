@@ -36,7 +36,7 @@ export function LeadAvatar({ lead, size = "sm", className = "" }: LeadAvatarProp
 
   return (
     <div
-      className={`flex ${sc} shrink-0 items-center justify-center rounded-full bg-[color-mix(in_srgb,var(--text)_8%,var(--surface))] font-semibold text-[var(--muted)] ring-1 ring-[var(--border)] ${className}`}
+      className={`flex ${sc} shrink-0 items-center justify-center rounded-full bg-[color-mix(in_srgb,var(--text)_8%,transparent)] font-semibold text-[var(--muted)] ring-1 ring-[var(--border)] ${className}`}
       aria-hidden
     >
       {initialsFromLead(lead)}

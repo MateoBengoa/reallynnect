@@ -5,6 +5,13 @@ import { getRedis, enqueueTaskDue, trySchedulerLock } from "../queues/redisClien
 const WARMUP_HOURS = Number(process.env.WARMUP_INTERVAL_HOURS ?? 18);
 const POLL_MS = Number(process.env.SCHEDULER_POLL_MS ?? 3_600_000);
 
+/** Mínimo entre encolados de poll_comments por cuenta (LinkedIn: menos ruido = menos riesgo). Por defecto ~2 veces/día. */
+const rawKeywordPollLockSec = Number(process.env.SCHEDULER_KEYWORD_POLL_LOCK_SEC ?? 43_200);
+const KEYWORD_POLL_LOCK_SEC =
+  Number.isFinite(rawKeywordPollLockSec) && rawKeywordPollLockSec >= 3600
+    ? Math.floor(rawKeywordPollLockSec)
+    : 43_200;
+
 async function hasPendingTask(
   sb: ReturnType<typeof getSupabaseAdmin>,
   accountId: string,
@@ -56,32 +63,36 @@ async function scheduleKeywordPolls(sb: ReturnType<typeof getSupabaseAdmin>, red
   const { data: accounts } = await sb.from("linkedin_accounts").select("id").eq("connection_status", "active");
 
   for (const a of accounts ?? []) {
-    for (const action of ["poll_messages", "poll_comments"] as const) {
-      const lockKey = `sched:${action}:${a.id}`;
-      const ok = await trySchedulerLock(redis, lockKey, 2700);
-      if (!ok) continue;
-      if (await hasPendingTask(sb, a.id, action)) continue;
+    const bundleLock = `sched:keyword_polls:${a.id}`;
+    const ok = await trySchedulerLock(redis, bundleLock, KEYWORD_POLL_LOCK_SEC);
+    if (!ok) continue;
 
-      const { data: task } = await sb
-        .from("tasks")
-        .insert({
-          account_id: a.id,
-          action,
-          scheduled_at: new Date().toISOString(),
-          status: "pending",
-          payload: {},
-        })
-        .select("id, scheduled_at")
-        .single();
-      if (task) await enqueueTaskDue(redis, task.id, new Date(task.scheduled_at).getTime());
-    }
+    if (await hasPendingTask(sb, a.id, "poll_comments")) continue;
+
+    const { data: task } = await sb
+      .from("tasks")
+      .insert({
+        account_id: a.id,
+        action: "poll_comments",
+        scheduled_at: new Date().toISOString(),
+        status: "pending",
+        payload: {},
+      })
+      .select("id, scheduled_at")
+      .single();
+    if (task) await enqueueTaskDue(redis, task.id, new Date(task.scheduled_at).getTime());
   }
 }
 
 async function main() {
   const sb = getSupabaseAdmin();
   const redis = getRedis();
-  console.log("scheduler started, interval ms", POLL_MS);
+  console.log(
+    "scheduler started, interval ms",
+    POLL_MS,
+    "keyword_poll_lock_sec",
+    KEYWORD_POLL_LOCK_SEC
+  );
 
   const tick = async () => {
     try {

@@ -21,14 +21,14 @@ function formatApiError(e: unknown): string {
 type CreateMode = "ai" | "manual";
 
 const STATUS_META: Record<string, { label: string; activeClass: string }> = {
-  draft:     { label: "Borrador",  activeClass: "border-[color-mix(in_srgb,var(--muted)_40%,var(--border))] bg-[color-mix(in_srgb,var(--text)_8%,var(--surface))] text-[var(--muted)]" },
-  scheduled: { label: "Programado", activeClass: "border-[color-mix(in_srgb,var(--accent)_45%,var(--border))] bg-[color-mix(in_srgb,var(--accent)_14%,var(--surface))] text-[var(--accent)]" },
-  published: { label: "Publicado",  activeClass: "border-[color-mix(in_srgb,#22c55e_40%,var(--border))] bg-[color-mix(in_srgb,#22c55e_14%,var(--surface))] text-[#86efac]" },
-  failed:    { label: "Error",      activeClass: "border-[color-mix(in_srgb,#f87171_45%,var(--border))] bg-[color-mix(in_srgb,#ef4444_12%,var(--surface))] text-[#fca5a5]" },
+  draft:     { label: "Borrador",  activeClass: "border-[color-mix(in_srgb,var(--muted)_40%,var(--border))] bg-[color-mix(in_srgb,var(--text)_8%,transparent)] text-[var(--muted)]" },
+  scheduled: { label: "Programado", activeClass: "border-[color-mix(in_srgb,var(--accent)_45%,var(--border))] bg-[color-mix(in_srgb,var(--accent)_14%,transparent)] text-[var(--accent)]" },
+  published: { label: "Publicado",  activeClass: "border-[color-mix(in_srgb,#22c55e_40%,var(--border))] bg-[color-mix(in_srgb,#22c55e_14%,transparent)] text-[#86efac]" },
+  failed:    { label: "Error",      activeClass: "border-[color-mix(in_srgb,#f87171_45%,var(--border))] bg-[color-mix(in_srgb,#ef4444_12%,transparent)] text-[#fca5a5]" },
 };
 
 function StatusBadge({ status }: { status: string }) {
-  const m = STATUS_META[status] ?? { label: status, activeClass: "border-[var(--border)] bg-[color-mix(in_srgb,var(--text)_6%,var(--surface))] text-[var(--muted)]" };
+  const m = STATUS_META[status] ?? { label: status, activeClass: "border-[var(--border)] bg-[color-mix(in_srgb,var(--text)_6%,transparent)] text-[var(--muted)]" };
   return (
     <span className={`shrink-0 rounded-full border px-2.5 py-0.5 text-[11px] font-semibold uppercase tracking-wide ${m.activeClass}`}>
       {m.label}
@@ -178,7 +178,7 @@ export default function ContentPostsPage() {
           onClick={openWizard}
           className="group flex min-h-[14rem] flex-col items-center justify-center gap-3 rounded-[var(--radius-lg)] border-2 border-dashed border-[color-mix(in_srgb,var(--muted)_38%,var(--border))] bg-[color-mix(in_srgb,var(--accent)_5%,transparent)] px-4 py-8 text-center transition-[border-color,background-color] hover:border-[color-mix(in_srgb,var(--accent)_55%,var(--border))] hover:bg-[color-mix(in_srgb,var(--accent)_10%,transparent)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]/40"
         >
-          <span className="flex h-12 w-12 items-center justify-center rounded-full border border-[color-mix(in_srgb,var(--accent)_35%,var(--border))] bg-[color-mix(in_srgb,var(--accent)_14%,var(--surface))] text-[var(--accent)] transition-transform group-hover:scale-105" aria-hidden>
+          <span className="flex h-12 w-12 items-center justify-center rounded-full border border-[color-mix(in_srgb,var(--accent)_35%,var(--border))] bg-[color-mix(in_srgb,var(--accent)_14%,transparent)] text-[var(--accent)] transition-transform group-hover:scale-105" aria-hidden>
             <svg className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
               <path strokeLinecap="round" strokeLinejoin="round" d="M12 4v16m8-8H4" />
             </svg>
@@ -204,7 +204,7 @@ export default function ContentPostsPage() {
                 {photo ? (
                   <img src={photo} alt={name} className="h-11 w-11 shrink-0 rounded-full object-cover ring-1 ring-[var(--border)]" />
                 ) : (
-                  <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-[color-mix(in_srgb,var(--accent)_18%,var(--surface))] text-base font-bold text-[var(--accent)] ring-1 ring-[var(--border)]">
+                  <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-[color-mix(in_srgb,var(--accent)_18%,transparent)] text-base font-bold text-[var(--accent)] ring-1 ring-[var(--border)]">
                     {initial}
                   </div>
                 )}
@@ -299,7 +299,7 @@ export default function ContentPostsPage() {
       {wizardOpen && (
         <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/65 p-4" role="dialog" aria-modal="true" aria-labelledby="post-wizard-title">
           <div className="popover-panel flex max-h-[min(92vh,40rem)] w-full max-w-lg flex-col overflow-hidden shadow-[var(--shadow-md)]">
-            <div className="border-b border-[var(--border)] bg-[color-mix(in_srgb,var(--accent)_6%,var(--surface))] px-5 py-4">
+            <div className="border-b border-[var(--border)] bg-[color-mix(in_srgb,var(--accent)_6%,transparent)] px-5 py-4">
               <div className="flex items-center justify-between gap-2">
                 <div>
                   <p className="text-[11px] font-semibold uppercase tracking-wide text-[var(--muted)]">Paso {wizardStep} de 3 · {stepTitle}</p>
@@ -316,7 +316,7 @@ export default function ContentPostsPage() {
 
             <div className="min-h-0 flex-1 overflow-y-auto px-5 py-5">
               {wizardError && (
-                <p className="mb-4 rounded-md border border-[color-mix(in_srgb,#f87171_40%,var(--border))] bg-[color-mix(in_srgb,#ef4444_10%,var(--surface))] px-3 py-2 text-sm text-[#fca5a5]">
+                <p className="mb-4 rounded-md border border-[color-mix(in_srgb,#f87171_40%,var(--border))] bg-[color-mix(in_srgb,#ef4444_10%,transparent)] px-3 py-2 text-sm text-[#fca5a5]">
                   {wizardError}
                 </p>
               )}
@@ -324,11 +324,11 @@ export default function ContentPostsPage() {
               {wizardStep === 1 && (
                 <div className="space-y-3">
                   <p className="text-sm text-[var(--muted)]">Elige cómo quieres crear el post.</p>
-                  <button type="button" onClick={() => { setCreateMode("ai"); setWizardStep(2); }} className="flex w-full flex-col rounded-[var(--radius-lg)] border border-[var(--border)] bg-[color-mix(in_srgb,var(--text)_3%,var(--surface))] p-4 text-left transition-colors hover:border-[color-mix(in_srgb,var(--accent)_35%,var(--border))] hover:bg-[color-mix(in_srgb,var(--accent)_6%,var(--surface))]">
+                  <button type="button" onClick={() => { setCreateMode("ai"); setWizardStep(2); }} className="flex w-full flex-col rounded-[var(--radius-lg)] border border-[var(--border)] bg-[color-mix(in_srgb,var(--text)_3%,transparent)] p-4 text-left transition-colors hover:border-[color-mix(in_srgb,var(--accent)_35%,var(--border))] hover:bg-[color-mix(in_srgb,var(--accent)_6%,transparent)]">
                     <span className="font-semibold text-[var(--text)]">Con IA</span>
                     <span className="mt-1 text-xs leading-snug text-[var(--muted)]">Describe un tema y Gemini genera el borrador (texto e imagen opcional).</span>
                   </button>
-                  <button type="button" onClick={() => { setCreateMode("manual"); setWizardStep(2); }} className="flex w-full flex-col rounded-[var(--radius-lg)] border border-[var(--border)] bg-[color-mix(in_srgb,var(--text)_3%,var(--surface))] p-4 text-left transition-colors hover:border-[color-mix(in_srgb,var(--accent)_35%,var(--border))] hover:bg-[color-mix(in_srgb,var(--accent)_6%,var(--surface))]">
+                  <button type="button" onClick={() => { setCreateMode("manual"); setWizardStep(2); }} className="flex w-full flex-col rounded-[var(--radius-lg)] border border-[var(--border)] bg-[color-mix(in_srgb,var(--text)_3%,transparent)] p-4 text-left transition-colors hover:border-[color-mix(in_srgb,var(--accent)_35%,var(--border))] hover:bg-[color-mix(in_srgb,var(--accent)_6%,transparent)]">
                     <span className="font-semibold text-[var(--text)]">Manual</span>
                     <span className="mt-1 text-xs leading-snug text-[var(--muted)]">Escribe el texto tú mismo y elige la cuenta.</span>
                   </button>
@@ -341,7 +341,7 @@ export default function ContentPostsPage() {
                     <span className={`${labelCap} mb-2`}>Tema del post</span>
                     <input className="input-field text-sm" placeholder="Ej. tendencias B2B en 2026" value={topic} onChange={(e) => setTopic(e.target.value)} autoFocus />
                   </label>
-                  <p className="rounded-[var(--radius-md)] border border-[var(--border)] bg-[color-mix(in_srgb,var(--text)_2%,var(--surface))] px-3.5 py-2.5 text-xs text-[var(--muted)]">
+                  <p className="rounded-[var(--radius-md)] border border-[var(--border)] bg-[color-mix(in_srgb,var(--text)_2%,transparent)] px-3.5 py-2.5 text-xs text-[var(--muted)]">
                     El borrador se crea en segundos. La imagen se genera desde la tarjeta una vez creado.
                   </p>
                 </div>
@@ -368,7 +368,7 @@ export default function ContentPostsPage() {
 
               {wizardStep === 3 && (
                 <div className="py-4 text-center">
-                  <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-full border border-[color-mix(in_srgb,#22c55e_40%,var(--border))] bg-[color-mix(in_srgb,#22c55e_12%,var(--surface))] text-[#86efac]" aria-hidden>
+                  <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-full border border-[color-mix(in_srgb,#22c55e_40%,var(--border))] bg-[color-mix(in_srgb,#22c55e_12%,transparent)] text-[#86efac]" aria-hidden>
                     <svg className="h-7 w-7" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
                       <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
                     </svg>
@@ -379,7 +379,7 @@ export default function ContentPostsPage() {
               )}
             </div>
 
-            <div className="flex flex-wrap items-center justify-between gap-2 border-t border-[var(--border)] bg-[color-mix(in_srgb,var(--text)_2%,var(--surface))] px-5 py-3">
+            <div className="flex flex-wrap items-center justify-between gap-2 border-t border-[var(--border)] bg-[color-mix(in_srgb,var(--text)_2%,transparent)] px-5 py-3">
               {wizardStep > 1 && wizardStep < 3 ? (
                 <button type="button" className="btn-secondary min-h-10" onClick={() => { setWizardError(null); setWizardStep(1); setCreateMode(null); }}>Atrás</button>
               ) : <span />}

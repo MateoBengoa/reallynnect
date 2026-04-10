@@ -8,7 +8,14 @@ import {
   scheduleEnrollmentStep,
 } from "../services/campaignEngine.js";
 import { generateImageBytes, generateIllustrationBrief, generatePost, type BrainContext, type PhotoContext } from "../services/gemini.js";
-import { pickProxyForAccount, syncWebshareProxies, autoAssignProxiesToAccounts } from "../services/proxyAssign.js";
+import {
+  pickProxyForAccount,
+  syncWebshareProxies,
+  autoAssignProxiesToAccounts,
+  loadProxy,
+  markProxyUsed,
+} from "../services/proxyAssign.js";
+import { trySyncInboxListHttp } from "../services/linkedinInboxHttpSync.js";
 import { enqueueTask } from "../services/taskQueue.js";
 
 const proxyBody = z.object({
@@ -56,7 +63,6 @@ const WORKER_ACTIONS_IMPLEMENTED = new Set([
   "reply_comment",
   "inmail",
   "publish_post",
-  "poll_messages",
   "poll_comments",
   "reply_dm",
   "sync_inbox",
@@ -2223,11 +2229,49 @@ export async function registerApiRoutes(app: FastifyInstance) {
       .parse(req.body);
     const { data: acc } = await sb
       .from("linkedin_accounts")
-      .select("id")
+      .select("id, li_at_cookie, proxy_id, user_id")
       .eq("id", body.account_id)
       .eq("user_id", req.userId!)
       .maybeSingle();
     if (!acc) return reply.status(404).send({ error: "Cuenta no encontrada" });
+
+    const httpFirst = (process.env.INBOX_SYNC_TRY_HTTP_FIRST ?? "true").toLowerCase();
+    if (httpFirst !== "false" && httpFirst !== "0" && !body.force) {
+      let liAtFast: string;
+      try {
+        liAtFast = decryptSecret((acc as { li_at_cookie: string }).li_at_cookie);
+      } catch {
+        liAtFast = "";
+      }
+      if (liAtFast.length >= 10) {
+        const requireProxy = process.env.REQUIRE_PROXY === "true";
+        const accRow = acc as { proxy_id: string | null; user_id: string };
+        let proxyIdFast = accRow.proxy_id;
+        let proxyRowFast = proxyIdFast ? await loadProxy(sb, proxyIdFast) : null;
+        if (!proxyRowFast) {
+          const np = await pickProxyForAccount(sb, accRow.user_id, body.account_id, proxyIdFast).catch(() => null);
+          if (np) {
+            proxyIdFast = np;
+            proxyRowFast = await loadProxy(sb, np);
+          }
+        }
+        if (!requireProxy || proxyRowFast) {
+          const maxThreadsRaw = Number(process.env.INBOX_SYNC_MAX_THREADS);
+          const maxThreads =
+            Number.isFinite(maxThreadsRaw) && maxThreadsRaw > 0 ? Math.floor(maxThreadsRaw) : 500;
+          const httpTry = await trySyncInboxListHttp(sb, body.account_id, liAtFast, maxThreads, proxyRowFast);
+          if (httpTry.ok) {
+            if (proxyIdFast) await markProxyUsed(sb, proxyIdFast);
+            return {
+              ok: true,
+              instant: true,
+              conversations: httpTry.count,
+              deduped: false,
+            };
+          }
+        }
+      }
+    }
 
     const failStale = {
       status: "failed" as const,
