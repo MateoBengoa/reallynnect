@@ -2385,14 +2385,22 @@ export async function runOneTask(sb: SupabaseClient, redis: RedisClient, taskId:
     }
   }
 
-  // acquireBrowserSlot fuera del try/finally: si Redis falla aquí el slot no se corrompe
-  // (nunca se incrementó), pero la tarea quedaría "running". Por eso capturamos el error
-  // y tratamos una excepción igual que gotSlot=false: reprogramar sin gastar un intento.
+  // verify_session y session_check son críticas: no pueden quedar bloqueadas por slots de campaña.
+  // Siempre se les concede un slot extra (no compiten con las tareas normales).
+  const isSessionAction = action === "verify_session" || action === "session_check";
+
   let gotSlot = false;
-  try {
-    gotSlot = await acquireBrowserSlot(redis);
-  } catch (slotErr) {
-    console.error(`[worker] acquireBrowserSlot error (${taskId.slice(0, 8)}):`, slotErr instanceof Error ? slotErr.message : slotErr);
+  if (isSessionAction) {
+    // Bypass del límite: adquirir siempre, aunque MAX_BROWSERS esté lleno.
+    // El slot se libera igual en el finally, así que el contador no queda corrupto.
+    await acquireBrowserSlot(redis).catch(() => {}); // intenta pero no bloquea si falla Redis
+    gotSlot = true;
+  } else {
+    try {
+      gotSlot = await acquireBrowserSlot(redis);
+    } catch (slotErr) {
+      console.error(`[worker] acquireBrowserSlot error (${taskId.slice(0, 8)}):`, slotErr instanceof Error ? slotErr.message : slotErr);
+    }
   }
   if (!gotSlot) {
     // Esperar más tiempo si es tarea de campaña para no ciclar cada 15s
