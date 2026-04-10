@@ -1,10 +1,10 @@
 /**
- * Sincroniza la lista de conversaciones vía API Voyager con solo li_at (+ JSESSIONID obtenido en bootstrap).
- * Misma idea que Prosp u otras herramientas: sesión HTTP, sin Playwright.
+ * Sincroniza la lista de conversaciones vía API Voyager con solo li_at.
+ * Usa el fetch global de Node 18+ (sin undici directo).
+ * El proxy se pasa a través de la variable de entorno HTTPS_PROXY si está configurada,
+ * o se ignora si no (la mayoría de VPS no necesitan proxy para el HTTP sync).
  */
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { fetch, ProxyAgent } from "undici";
-import type { Dispatcher } from "undici";
 import { parseVoyagerConversationList } from "../lib/voyagerMessagingParse.js";
 import type { InboxListRow } from "../types/inboxList.js";
 import { bulkUpsertInboxConversationsOrdered } from "./inboxBulkUpsert.js";
@@ -19,10 +19,15 @@ function serializeCookieJar(jar: Map<string, string>): string {
     .join("; ");
 }
 
-function absorbSetCookie(jar: Map<string, string>, res: { headers: { getSetCookie?: () => string[] } }): void {
-  const getter = res.headers.getSetCookie;
-  const lines = typeof getter === "function" ? getter.call(res.headers) : [];
-  for (const line of lines) {
+function absorbSetCookie(jar: Map<string, string>, res: Response): void {
+  // El fetch global de Node 18 no expone Set-Cookie directamente por seguridad,
+  // pero sí a través de headers.getSetCookie() en Node 20+ o como header individual.
+  const raw =
+    typeof (res.headers as unknown as { getSetCookie?: () => string[] }).getSetCookie === "function"
+      ? (res.headers as unknown as { getSetCookie: () => string[] }).getSetCookie()
+      : [res.headers.get("set-cookie") ?? ""].filter(Boolean);
+
+  for (const line of raw) {
     const eq = line.indexOf("=");
     if (eq < 1) continue;
     const name = line.slice(0, eq).trim();
@@ -39,29 +44,61 @@ function csrfFromJar(jar: Map<string, string>): string | null {
   return raw.replace(/^"/, "").replace(/"$/, "").trim() || null;
 }
 
+/** Construye la URL de proxy si hay proxy disponible y tiene host. */
+function proxyUrl(proxy: ProxyRow | null): string | null {
+  if (!proxy?.host) return null;
+  const auth =
+    proxy.username && proxy.password
+      ? `${encodeURIComponent(proxy.username)}:${encodeURIComponent(proxy.password)}@`
+      : "";
+  return `http://${auth}${proxy.host}:${proxy.port}`;
+}
+
+/**
+ * Crea un RequestInit con soporte de proxy vía undici ProxyAgent si undici está instalado.
+ * Si no lo está, devuelve un RequestInit sin dispatcher (fetch directo).
+ */
+async function makeFetchInit(
+  base: RequestInit & { redirect?: RequestRedirect },
+  pUrl: string | null
+): Promise<RequestInit> {
+  if (!pUrl) return base;
+  try {
+    // Intento dinámico: si undici está instalado, úsalo
+    const { ProxyAgent } = await import("undici");
+    return { ...base, dispatcher: new ProxyAgent(pUrl) } as RequestInit;
+  } catch {
+    // undici no instalado — fetch directo sin proxy
+    return base;
+  }
+}
+
 async function bootstrapLinkedInMessaging(
   liAt: string,
-  dispatcher?: Dispatcher
+  pUrl: string | null
 ): Promise<{ cookieHeader: string; csrf: string } | null> {
   const jar = new Map<string, string>();
   jar.set("li_at", liAt);
 
   let url = "https://www.linkedin.com/messaging/";
   for (let hop = 0; hop < 12; hop++) {
-    const res = await fetch(url, {
-      method: "GET",
-      redirect: "manual",
-      dispatcher,
-      headers: {
-        Cookie: serializeCookieJar(jar),
-        "User-Agent": CHROME_UA,
-        Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "es-ES,es;q=0.9,en;q=0.8",
-        "Cache-Control": "no-cache",
-        "Upgrade-Insecure-Requests": "1",
+    const init = await makeFetchInit(
+      {
+        method: "GET",
+        redirect: "manual",
+        headers: {
+          Cookie: serializeCookieJar(jar),
+          "User-Agent": CHROME_UA,
+          Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+          "Accept-Language": "es-ES,es;q=0.9,en;q=0.8",
+          "Cache-Control": "no-cache",
+          "Upgrade-Insecure-Requests": "1",
+        },
       },
-    });
+      pUrl
+    );
 
+    const res = await fetch(url, init);
     absorbSetCookie(jar, res);
 
     if (res.status >= 300 && res.status < 400) {
@@ -102,25 +139,27 @@ async function fetchVoyagerConversationsPage(
   csrf: string,
   start: number,
   count: number,
-  dispatcher?: Dispatcher
+  pUrl: string | null
 ): Promise<unknown | null> {
   const u = `https://www.linkedin.com/voyager/api/messaging/conversations?keyVersion=LEGACY_INBOX&start=${start}&count=${count}`;
-  const r = await fetch(u, {
-    dispatcher,
-    headers: {
-      accept: "application/vnd.linkedin.normalized+json+2.1",
-      "csrf-token": csrf,
-      "x-restli-protocol-version": "2.0.0",
-      "x-li-lang": "en_US",
-      Referer: "https://www.linkedin.com/messaging/",
-      Origin: "https://www.linkedin.com",
-      "User-Agent": CHROME_UA,
-      Cookie: cookieHeader,
+  const init = await makeFetchInit(
+    {
+      headers: {
+        accept: "application/vnd.linkedin.normalized+json+2.1",
+        "csrf-token": csrf,
+        "x-restli-protocol-version": "2.0.0",
+        "x-li-lang": "en_US",
+        Referer: "https://www.linkedin.com/messaging/",
+        Origin: "https://www.linkedin.com",
+        "User-Agent": CHROME_UA,
+        Cookie: cookieHeader,
+      },
     },
-  });
-  if (!r.ok) {
-    return { _status: r.status };
-  }
+    pUrl
+  );
+
+  const r = await fetch(u, init);
+  if (!r.ok) return { _status: r.status };
   try {
     return await r.json();
   } catch {
@@ -128,23 +167,13 @@ async function fetchVoyagerConversationsPage(
   }
 }
 
-function buildDispatcher(proxy: ProxyRow | null): Dispatcher | undefined {
-  if (!proxy?.host) return undefined;
-  const auth =
-    proxy.username && proxy.password
-      ? `${encodeURIComponent(proxy.username)}:${encodeURIComponent(proxy.password)}@`
-      : "";
-  const u = `http://${auth}${proxy.host}:${proxy.port}`;
-  return new ProxyAgent(u);
-}
-
 async function runVoyagerListHttp(
   liAt: string,
   maxThreads: number,
   proxy: ProxyRow | null
 ): Promise<InboxListRow[] | null> {
-  const dispatcher = buildDispatcher(proxy);
-  const boot = await bootstrapLinkedInMessaging(liAt, dispatcher);
+  const pUrl = proxyUrl(proxy);
+  const boot = await bootstrapLinkedInMessaging(liAt, pUrl);
   if (!boot) return null;
 
   const pageSize = 100;
@@ -155,7 +184,7 @@ async function runVoyagerListHttp(
   for (let pg = 0; pg < maxPages; pg++) {
     const start = pg * pageSize;
     const count = Math.min(pageSize, maxThreads - allRows.length);
-    const body = await fetchVoyagerConversationsPage(boot.cookieHeader, boot.csrf, start, count, dispatcher);
+    const body = await fetchVoyagerConversationsPage(boot.cookieHeader, boot.csrf, start, count, pUrl);
 
     if (!body || typeof body !== "object") {
       if (pg === 0) return null;
