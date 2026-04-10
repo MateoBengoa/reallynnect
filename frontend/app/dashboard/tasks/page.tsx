@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import { getValidAccessToken } from "@/lib/supabase";
 import { api } from "@/lib/api";
 
@@ -291,9 +291,8 @@ export default function TasksPage() {
               </tr>
             )}
             {tasks.map((t) => (
-              <>
+              <React.Fragment key={t.id}>
                 <tr
-                  key={t.id}
                   className="border-b border-[var(--border)]/50 bg-[color-mix(in_srgb,var(--surface)_32%,transparent)] transition-colors hover:bg-[color-mix(in_srgb,var(--text)_3%,transparent)]"
                 >
                   <td className="px-3 py-2 font-mono font-semibold text-[var(--text)]">{t.action}</td>
@@ -351,7 +350,7 @@ export default function TasksPage() {
                   </td>
                 </tr>
                 {expanded === t.id && (
-                  <tr key={`${t.id}-exp`} className="border-b border-[var(--border)]/50 bg-[color-mix(in_srgb,var(--text)_2%,transparent)]">
+                  <tr className="border-b border-[var(--border)]/50 bg-[color-mix(in_srgb,var(--text)_2%,transparent)]">
                     <td colSpan={8} className="px-3 py-2">
                       {t.error_message && (
                         <p className="mb-1.5 rounded bg-red-500/10 px-2 py-1 text-[10px] font-mono text-red-400">
@@ -372,7 +371,7 @@ export default function TasksPage() {
                     </td>
                   </tr>
                 )}
-              </>
+              </React.Fragment>
             ))}
           </tbody>
         </table>

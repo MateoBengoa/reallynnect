@@ -178,9 +178,22 @@ export async function registerApiRoutes(app: FastifyInstance) {
     const workerSeemsRunningByHb = heartbeatMs !== null && Date.now() - heartbeatMs < 90_000;
 
     // Fallback: si el heartbeat no llega (procesos separados sin Redis compartido),
-    // detectar actividad del worker mirando tareas running/completed recientes en la BD.
+    // detectar actividad del worker mirando locked_at reciente en BD.
+    // locked_at es el instante en que el worker reclamó la tarea — prueba directa de vida.
     let workerSeemsRunning = workerSeemsRunningByHb;
     if (!workerSeemsRunning && accountIds.length) {
+      // 1) Alguna tarea con locked_at reciente (≤10 min) — worker la inició hace poco.
+      const lockedCutoff = new Date(Date.now() - 10 * 60_000).toISOString();
+      const { count: lockedActivity } = await sb
+        .from("tasks")
+        .select("id", { count: "exact", head: true })
+        .in("account_id", accountIds)
+        .not("locked_at", "is", null)
+        .gte("locked_at", lockedCutoff);
+      if ((lockedActivity ?? 0) > 0) workerSeemsRunning = true;
+    }
+    if (!workerSeemsRunning && accountIds.length) {
+      // 2) Tarea creada recientemente (≤3 min) en running/completed — tarea recién encolada y ejecutada.
       const recentCutoff = new Date(Date.now() - 3 * 60_000).toISOString();
       const { count: recentActivity } = await sb
         .from("tasks")
