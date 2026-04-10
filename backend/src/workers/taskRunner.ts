@@ -2181,7 +2181,14 @@ async function failTask(
     const action = task.action as string;
     const accId = task.account_id as string | undefined;
     if (accId && (action === "verify_session" || action === "session_check")) {
-      await sb.from("linkedin_accounts").update({ connection_status: "error" }).eq("id", accId);
+      // Solo marcar como error de sesión si el fallo es real de LinkedIn (login/challenge),
+      // no por problemas de red o proxy (navigation_timeout, ERR_TUNNEL, etc.)
+      const isNetworkError =
+        finalMsg.startsWith("navigation_timeout") ||
+        /ERR_TUNNEL|ERR_CONNECTION|ERR_NAME_NOT_RESOLVED|ERR_NETWORK|net::/i.test(finalMsg);
+      if (!isNetworkError) {
+        await sb.from("linkedin_accounts").update({ connection_status: "error" }).eq("id", accId);
+      }
     }
     // Marcar el enrollment como fallido para que no quede huérfano sin tarea pendiente
     const enrollmentId = task.enrollment_id as string | undefined;
