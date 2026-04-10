@@ -10,19 +10,33 @@ export default function LoginPage() {
   const [password, setPassword] = useState("");
   const [mode, setMode] = useState<"login" | "signup">("login");
   const [err, setErr] = useState<string | null>(null);
+  const [info, setInfo] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
     setErr(null);
-    if (mode === "signup") {
-      const { error } = await supabase.auth.signUp({ email, password });
-      if (error) return setErr(error.message);
+    setInfo(null);
+    setLoading(true);
+    try {
+      if (mode === "signup") {
+        const { data, error } = await supabase.auth.signUp({ email, password });
+        if (error) { setErr(error.message); return; }
+        // Si Supabase tiene confirmación de email, no habrá sesión todavía.
+        if (data.session) {
+          router.push("/dashboard");
+        } else {
+          setInfo("Revisa tu email para confirmar la cuenta. Luego inicia sesión.");
+          setMode("login");
+        }
+        return;
+      }
+      const { error } = await supabase.auth.signInWithPassword({ email, password });
+      if (error) { setErr(error.message); return; }
       router.push("/dashboard");
-      return;
+    } finally {
+      setLoading(false);
     }
-    const { error } = await supabase.auth.signInWithPassword({ email, password });
-    if (error) return setErr(error.message);
-    router.push("/dashboard");
   }
 
   return (
@@ -74,8 +88,11 @@ export default function LoginPage() {
           {err && (
             <p className="rounded-[var(--radius-md)] border border-red-500/30 bg-red-500/10 px-3 py-2 text-sm text-red-400">{err}</p>
           )}
-          <button type="submit" className="btn-primary mt-2 w-full">
-            Continuar
+          {info && (
+            <p className="rounded-[var(--radius-md)] border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-sm text-emerald-400">{info}</p>
+          )}
+          <button type="submit" disabled={loading} className="btn-primary mt-2 w-full disabled:opacity-60">
+            {loading ? "…" : "Continuar"}
           </button>
         </form>
 
