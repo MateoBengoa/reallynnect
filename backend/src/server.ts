@@ -6,6 +6,11 @@ import { verifySupabaseJwt } from "./lib/auth.js";
 import { getSupabaseAdmin } from "./lib/supabase.js";
 import { getQueueMode, getRedis, type RedisClient } from "./queues/redisClient.js";
 import { registerApiRoutes } from "./routes/api.js";
+import {
+  prepareWorkerRuntime,
+  shouldEmbedTaskWorkerInApi,
+  startPeriodicTaskProcessing,
+} from "./workers/workerLoop.js";
 
 declare module "fastify" {
   interface FastifyRequest {
@@ -79,8 +84,19 @@ const port = Number(process.env.PORT ?? 3001);
 const host = process.env.HOST ?? "0.0.0.0";
 
 buildServer()
-  .then((app) => app.listen({ port, host }))
-  .then(() => console.log(`API http://${host}:${port}`))
+  .then(async (app) => {
+    await app.listen({ port, host });
+    console.log(`API http://${host}:${port}`);
+    if (shouldEmbedTaskWorkerInApi()) {
+      const sb = getSupabaseAdmin();
+      const redis = getRedis();
+      console.log(
+        "[api] Cola de tareas embebida en este proceso (verify_session, campañas, inbox…). Pon EMBED_TASK_WORKER=false si usas worker dedicado."
+      );
+      await prepareWorkerRuntime(sb, redis);
+      startPeriodicTaskProcessing(sb, redis, "[api+worker]");
+    }
+  })
   .catch((e) => {
     console.error(e);
     process.exit(1);

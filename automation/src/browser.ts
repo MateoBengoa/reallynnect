@@ -1,4 +1,5 @@
 import { chromium, type Browser, type BrowserContext, type Page } from "playwright";
+import fs from "fs";
 
 export type ProxyConfig = {
   server: string;
@@ -10,6 +11,9 @@ export type BrowserSessionOptions = {
   proxy?: ProxyConfig;
   userAgent?: string;
   headless?: boolean;
+  /** Directorio de perfil persistente (por cuenta). Si se provee, usa launchPersistentContext
+   *  para que LinkedIn vea siempre el mismo fingerprint y no invalide la sesión. */
+  profileDir?: string;
 };
 
 // Realistic Chrome 131 UA for Windows — matches the launch channel
@@ -143,35 +147,29 @@ export async function createContext(
   const slowMo = Number.isFinite(slowMoRaw) && slowMoRaw > 0 ? slowMoRaw : undefined;
   const locale = localeFromEnv();
 
-  const browser = await chromium.launch({
-    headless: options.headless !== false,
-    channel,
-    slowMo,
-    args: [
-      "--disable-blink-features=AutomationControlled",
-      "--no-sandbox",
-      "--disable-setuid-sandbox",
-      "--disable-dev-shm-usage",
-      "--disable-infobars",
-      "--window-size=1280,800",
-      // Additional stealth flags
-      "--disable-features=IsolateOrigins,site-per-process",
-      "--disable-web-security",
-      "--allow-running-insecure-content",
-      "--disable-background-networking",
-      "--disable-client-side-phishing-detection",
-      "--disable-sync",
-      "--metrics-recording-only",
-      "--no-first-run",
-      "--password-store=basic",
-      "--use-mock-keychain",
-      "--lang=es-ES",
-    ],
-  });
+  const launchArgs = [
+    "--disable-blink-features=AutomationControlled",
+    "--no-sandbox",
+    "--disable-setuid-sandbox",
+    "--disable-dev-shm-usage",
+    "--disable-infobars",
+    "--window-size=1280,800",
+    "--disable-features=IsolateOrigins,site-per-process",
+    "--disable-web-security",
+    "--allow-running-insecure-content",
+    "--disable-background-networking",
+    "--disable-client-side-phishing-detection",
+    "--disable-sync",
+    "--metrics-recording-only",
+    "--no-first-run",
+    "--password-store=basic",
+    "--use-mock-keychain",
+    "--lang=es-ES",
+  ];
 
-  const context = await browser.newContext({
+  const contextOptions = {
     userAgent: options.userAgent ?? DEFAULT_UA,
-    viewport: { width: 1280, height: 800 },
+    viewport: { width: 1280, height: 800 } as { width: number; height: number } | null,
     screen: { width: 1280, height: 800 },
     locale,
     ...(process.env.PLAYWRIGHT_TIMEZONE?.trim()
@@ -180,7 +178,6 @@ export async function createContext(
     proxy: options.proxy,
     ignoreHTTPSErrors: false,
     acceptDownloads: true,
-    // Realistic extra HTTP headers
     extraHTTPHeaders: {
       "Accept-Language": `${locale},${locale.split("-")[0] ?? "es"};q=0.9,en-US;q=0.8,en;q=0.7`,
       "Accept-Encoding": "gzip, deflate, br",
@@ -188,10 +185,34 @@ export async function createContext(
       "sec-ch-ua-mobile": "?0",
       "sec-ch-ua-platform": '"Windows"',
     },
+  };
+
+  if (options.profileDir) {
+    // Perfil persistente por cuenta: LinkedIn ve siempre el mismo fingerprint/cookies → no invalida sesión
+    fs.mkdirSync(options.profileDir, { recursive: true });
+    const context = await chromium.launchPersistentContext(options.profileDir, {
+      headless: options.headless !== false,
+      channel,
+      slowMo,
+      args: launchArgs,
+      ...contextOptions,
+    });
+    await context.addInitScript(buildStealthScript(locale));
+    const page = context.pages()[0] ?? await context.newPage();
+    const browser = context.browser()!;
+    return { browser, context, page };
+  }
+
+  // Sin profileDir: contexto efímero (smoke tests, uso puntual)
+  const browser = await chromium.launch({
+    headless: options.headless !== false,
+    channel,
+    slowMo,
+    args: launchArgs,
   });
 
+  const context = await browser.newContext(contextOptions);
   await context.addInitScript(buildStealthScript(locale));
-
   const page = await context.newPage();
   return { browser, context, page };
 }

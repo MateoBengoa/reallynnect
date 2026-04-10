@@ -2252,6 +2252,15 @@ const LINKEDIN_AUTOMATION_ACTIONS = new Set([
   "comment_post",
 ]);
 
+/**
+ * Devuelve el directorio de perfil persistente para una cuenta LinkedIn.
+ * Cada cuenta tiene su propio perfil → LinkedIn ve siempre el mismo fingerprint y no invalida la sesión.
+ */
+function getAccountProfileDir(accountId: string): string {
+  const base = (process.env.PROFILES_BASE_DIR ?? "").trim() || path.join(process.cwd(), "profiles");
+  return path.join(base, accountId);
+}
+
 export async function runOneTask(sb: SupabaseClient, redis: RedisClient, taskId: string): Promise<void> {
   const task = await claimTask(sb, taskId);
   if (!task) {
@@ -2472,8 +2481,9 @@ export async function runOneTask(sb: SupabaseClient, redis: RedisClient, taskId:
     }
 
     const headless = process.env.PLAYWRIGHT_HEADLESS !== "false";
-    console.log("[worker] Abriendo navegador (headless=", headless, proxy ? `proxy=${proxyRow?.host}` : "SIN PROXY ⚠️", ") para", action);
-    browser = await createContext({ proxy, headless });
+    const profileDir = getAccountProfileDir(accountId);
+    console.log("[worker] Abriendo navegador (headless=", headless, proxy ? `proxy=${proxyRow?.host}` : "SIN PROXY ⚠️", `profile=${profileDir}`, ") para", action);
+    browser = await createContext({ proxy, headless, profileDir });
     const { page } = browser;
     await injectLiAt(page, liAt);
 
