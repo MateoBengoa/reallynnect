@@ -121,10 +121,14 @@ async function writeVoiceDataUrlToTempFile(taskId: string, dataUrl: string): Pro
 const colMissingLockedAt = (msg: string | undefined) =>
   Boolean(msg && (msg.includes("locked_at") || msg.includes("schema cache")));
 
-/** Menor número = antes en la cola (campañas antes que poll automático). */
+/**
+ * Menor número = antes en la cola.
+ * verify_session / session_check van antes que campañas: si no, con miles de enrollments
+ * pendientes la verificación nunca entra en el batch ni en el límite de 32 filas de poll.
+ */
 function taskDispatchGroup(action: string, enrollmentId: unknown): number {
+  if (action === "verify_session" || action === "session_check" || action === "sync_profile") return -1;
   if (enrollmentId) return 0;
-  if (action === "verify_session" || action === "session_check" || action === "sync_profile") return 1;
   if (
     action === "visit_profile" ||
     action === "sync_lead_photo" ||
@@ -139,19 +143,19 @@ function taskDispatchGroup(action: string, enrollmentId: unknown): number {
     action === "reply_comment" ||
     action === "inmail"
   )
-    return 2;
-  if (action === "publish_post") return 2;
-  if (action === "warmup_feed") return 4;
-  if (action === "import_leads") return 2;
-    if (
-      action === "poll_comments" ||
-      action === "sync_inbox" ||
-      action === "sync_inbox_thread" ||
-      action === "sync_linkedin_posts"
-    )
-      return 10;
-    if (action === "reply_dm") return 2;
-  return 3;
+    return 1;
+  if (action === "publish_post") return 1;
+  if (action === "warmup_feed") return 3;
+  if (action === "import_leads") return 1;
+  if (
+    action === "poll_comments" ||
+    action === "sync_inbox" ||
+    action === "sync_inbox_thread" ||
+    action === "sync_linkedin_posts"
+  )
+    return 10;
+  if (action === "reply_dm") return 1;
+  return 2;
 }
 
 async function runPollWithTimeout<T>(run: () => Promise<T>, ms: number, label: string): Promise<T> {
@@ -3670,7 +3674,22 @@ export async function processDueTasks(sb: SupabaseClient, redis: RedisClient): P
     .order("scheduled_at", { ascending: true })
     .limit(32);
 
-  const dbIds = dueRows?.map((r) => r.id) ?? [];
+  // Incluir siempre verificación de sesión aunque haya >32 tareas más antiguas (evita pending eterno)
+  const { data: sessionVerifyRows } = await sb
+    .from("tasks")
+    .select("id, action, enrollment_id, scheduled_at")
+    .eq("status", "pending")
+    .lte("scheduled_at", nowIso)
+    .in("action", ["verify_session", "session_check", "sync_profile"])
+    .order("scheduled_at", { ascending: true })
+    .limit(24);
+
+  const dbIds = [
+    ...new Set([
+      ...(dueRows?.map((r) => r.id) ?? []),
+      ...(sessionVerifyRows?.map((r) => r.id) ?? []),
+    ]),
+  ];
   const unique = [...new Set([...zids, ...dbIds])];
 
   let metaList: { id: string; action: string; enrollment_id: string | null; scheduled_at: string }[] = [];
@@ -3719,7 +3738,7 @@ export async function processDueTasks(sb: SupabaseClient, redis: RedisClient): P
       "[worker:debug] poll",
       JSON.stringify({
         zset_ids: zids.length,
-        db_due_ids: dbIds.length,
+        db_due_ids: (dueRows?.length ?? 0) + (sessionVerifyRows?.length ?? 0),
         merged_unique: unique.length,
         parallel: maxParallel,
         will_run: batch.length,
