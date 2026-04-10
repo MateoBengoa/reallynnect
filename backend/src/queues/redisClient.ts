@@ -67,14 +67,24 @@ export const TASKS_DUE_ZSET = "automation_tasks:due";
 /** Marca de tiempo (ms) del último tick de `processDueTasks`; TTL 120s. Solo con Redis real. */
 export const WORKER_HEARTBEAT_KEY = "automation:worker_heartbeat_ms";
 
+/** Fallback en memoria para cuando no hay Redis real (API + worker en el mismo proceso). */
+let memHeartbeatMs: number | null = null;
+
 export async function touchWorkerHeartbeat(redis: RedisClient): Promise<void> {
-  if (isMemoryRedis(redis)) return;
+  if (isMemoryRedis(redis)) {
+    memHeartbeatMs = Date.now();
+    return;
+  }
   await (redis as Redis).set(WORKER_HEARTBEAT_KEY, String(Date.now()), "EX", 120);
 }
 
-/** `null` si no hay Redis, clave ausente o valor inválido. */
+/** `null` si el worker nunca arrancó o el heartbeat expiró (>120s). */
 export async function getWorkerHeartbeatTimestampMs(redis: RedisClient): Promise<number | null> {
-  if (isMemoryRedis(redis)) return null;
+  if (isMemoryRedis(redis)) {
+    if (memHeartbeatMs === null) return null;
+    // TTL equivalente: 120s
+    return Date.now() - memHeartbeatMs < 120_000 ? memHeartbeatMs : null;
+  }
   const v = await (redis as Redis).get(WORKER_HEARTBEAT_KEY);
   if (!v) return null;
   const n = parseInt(v, 10);
