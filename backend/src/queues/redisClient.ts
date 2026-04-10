@@ -64,6 +64,22 @@ export function getRedis(): RedisClient {
 export const BROWSER_SLOT_KEY = "browser:active_count";
 export const MAX_BROWSERS = 4;
 export const TASKS_DUE_ZSET = "automation_tasks:due";
+/** Marca de tiempo (ms) del último tick de `processDueTasks`; TTL 120s. Solo con Redis real. */
+export const WORKER_HEARTBEAT_KEY = "automation:worker_heartbeat_ms";
+
+export async function touchWorkerHeartbeat(redis: RedisClient): Promise<void> {
+  if (isMemoryRedis(redis)) return;
+  await (redis as Redis).set(WORKER_HEARTBEAT_KEY, String(Date.now()), "EX", 120);
+}
+
+/** `null` si no hay Redis, clave ausente o valor inválido. */
+export async function getWorkerHeartbeatTimestampMs(redis: RedisClient): Promise<number | null> {
+  if (isMemoryRedis(redis)) return null;
+  const v = await (redis as Redis).get(WORKER_HEARTBEAT_KEY);
+  if (!v) return null;
+  const n = parseInt(v, 10);
+  return Number.isFinite(n) ? n : null;
+}
 
 const acquireScript = `
 local c = tonumber(redis.call('GET', KEYS[1]) or '0')

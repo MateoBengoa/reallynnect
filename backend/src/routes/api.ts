@@ -1,6 +1,11 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
-import { enqueueTaskDue, getQueueMode } from "../queues/redisClient.js";
+import {
+  enqueueTaskDue,
+  getQueueMode,
+  getWorkerHeartbeatTimestampMs,
+  isMemoryRedis,
+} from "../queues/redisClient.js";
 import { decryptSecret, encryptSecret, maskSecret } from "../lib/crypto.js";
 import {
   createEnrollmentsAndSchedule,
@@ -167,6 +172,23 @@ export async function registerApiRoutes(app: FastifyInstance) {
       else pending_due_now = count ?? 0;
     }
 
+    const heartbeatMs = await getWorkerHeartbeatTimestampMs(redis);
+    const workerHeartbeatAgeSec =
+      heartbeatMs !== null ? Math.max(0, Math.round((Date.now() - heartbeatMs) / 1000)) : null;
+    const workerSeemsRunning = heartbeatMs !== null && Date.now() - heartbeatMs < 90_000;
+
+    if (pending_due_now > 0 && !workerSeemsRunning) {
+      if (isMemoryRedis(redis)) {
+        warnings.push(
+          "Hay tareas pendientes ya listas (hora programada ≤ ahora) pero la cola está en memoria: el API y el worker son procesos distintos. Arranca el worker (`npm run dev:worker` desde la raíz) o todo junto con `npm run dev`. Solo `npm run dev:frontend` no ejecuta tareas."
+        );
+      } else {
+        warnings.push(
+          "Hay tareas listas para ejecutar pero no hay latido del worker en Redis (<90s). Arranca `npm run dev:worker` desde la raíz o revisa REDIS_URL y que el worker esté en ejecución."
+        );
+      }
+    }
+
     let recentTasks: unknown[] = [];
     if (accountIds.length) {
       const { data, error } = await sb
@@ -224,6 +246,11 @@ export async function registerApiRoutes(app: FastifyInstance) {
       schema: { tasks_locked_at_column_ok: tasks_locked_at_ok },
       linkedin_accounts: { count: accounts?.length ?? 0, by_connection_status: byStatus },
       tasks: { counts_by_status: taskCounts, pending_scheduled_ready: pending_due_now },
+      worker: {
+        queue_mode: getQueueMode(),
+        heartbeat_age_sec: workerHeartbeatAgeSec,
+        seems_running: workerSeemsRunning,
+      },
       campaign_enrollments_by_status: enByStatus,
       recent_tasks: recentTasks,
       warnings,

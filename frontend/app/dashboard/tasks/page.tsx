@@ -77,6 +77,7 @@ export default function TasksPage() {
   const [deleting, setDeleting] = useState<string | null>(null);
   const [skipping, setSkipping] = useState<string | null>(null);
   const [bulkStatus, setBulkStatus] = useState<string | null>(null);
+  const [workerHint, setWorkerHint] = useState<string | null>(null);
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const load = useCallback(async () => {
@@ -99,6 +100,38 @@ export default function TasksPage() {
       if (intervalRef.current) clearInterval(intervalRef.current);
     };
   }, [autoRefresh, load]);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function pollDiag() {
+      if (!(await getValidAccessToken())) return;
+      try {
+        const r = await api<{
+          tasks?: { pending_scheduled_ready?: number };
+          worker?: { seems_running?: boolean };
+          warnings?: string[];
+        }>("/debug/diagnostics");
+        if (cancelled) return;
+        const pend = r.tasks?.pending_scheduled_ready ?? 0;
+        const up = r.worker?.seems_running ?? false;
+        if (pend > 0 && !up) {
+          const line = r.warnings?.find((x) => /pendientes|tareas listas|latido|worker/i.test(x));
+          setWorkerHint(
+            line ??
+              "Hay tareas listas pero no se detecta el worker. Desde la raíz del repo ejecuta npm run dev:worker o npm run dev (API + worker + frontend). Solo npm run dev:frontend no procesa la cola."
+          );
+        } else setWorkerHint(null);
+      } catch {
+        if (!cancelled) setWorkerHint(null);
+      }
+    }
+    void pollDiag();
+    const id = setInterval(pollDiag, 12_000);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, []);
 
   const skipDelay = useCallback(async (id: string) => {
     setSkipping(id);
@@ -163,6 +196,16 @@ export default function TasksPage() {
           </label>
         </div>
       </div>
+
+      {workerHint ? (
+        <div
+          role="status"
+          className="rounded-[var(--radius-md)] border border-amber-500/45 bg-amber-500/10 px-3 py-2.5 text-sm leading-snug text-amber-100"
+        >
+          <span className="font-semibold text-amber-50">Worker de automatización: </span>
+          {workerHint}
+        </div>
+      ) : null}
 
       {/* Counters */}
       <div className="flex flex-wrap gap-2">

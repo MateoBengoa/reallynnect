@@ -36,6 +36,7 @@ import {
   incrementDailyCount,
   incrementHourlyCount,
   enqueueTaskDue,
+  touchWorkerHeartbeat,
   popDueTaskIds,
   releaseBrowserSlot,
   removeTaskFromDue,
@@ -3671,6 +3672,7 @@ export async function runOneTask(sb: SupabaseClient, redis: RedisClient, taskId:
 
 export async function processDueTasks(sb: SupabaseClient, redis: RedisClient): Promise<void> {
   await recoverStaleRunningTasks(sb, redis);
+  await touchWorkerHeartbeat(redis).catch(() => {});
 
   const zids = await popDueTaskIds(redis, Date.now(), 10);
   const nowIso = new Date().toISOString();
