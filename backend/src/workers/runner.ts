@@ -20,6 +20,26 @@ async function main() {
     ).catch(() => {});
   }
   console.log("[worker] Contador de slots de navegador reiniciado a 0.");
+
+  // Las acciones cortas (verify_session, session_check, poll_comments) que quedaron en
+  // «running» al morir el worker anterior se resetean inmediatamente a pending, en lugar
+  // de esperar los 120-300s del stale poll. Esto evita que verify_session quede bloqueada
+  // varios minutos cada vez que el worker se reinicia.
+  try {
+    const shortActions = ["verify_session", "session_check", "poll_comments"];
+    const { data: reset } = await sb
+      .from("tasks")
+      .update({ status: "pending", error_message: "worker_restarted", locked_at: null })
+      .eq("status", "running")
+      .in("action", shortActions)
+      .select("id");
+    if (reset && reset.length > 0) {
+      console.log(`[worker] Reset de ${reset.length} tarea(s) cortas en «running» al arrancar.`);
+    }
+  } catch (startErr) {
+    console.warn("[worker] startup task reset falló (no crítico):", startErr instanceof Error ? startErr.message : startErr);
+  }
+
   console.log("automation worker started, poll", INTERVAL_MS, "ms");
   console.log(
     "[worker] .env desde paquete backend | headless=",

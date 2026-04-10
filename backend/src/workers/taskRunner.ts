@@ -2391,14 +2391,16 @@ export async function runOneTask(sb: SupabaseClient, redis: RedisClient, taskId:
   const isSessionAction = action === "verify_session" || action === "session_check";
 
   let gotSlot = false;
+  // Rastreamos si realmente incrementamos el contador — solo entonces lo decrementamos en el finally.
+  let acquiredSlot = false;
   if (isSessionAction) {
-    // Bypass del límite: adquirir siempre, aunque MAX_BROWSERS esté lleno.
-    // El slot se libera igual en el finally, así que el contador no queda corrupto.
-    await acquireBrowserSlot(redis).catch(() => {}); // intenta pero no bloquea si falla Redis
-    gotSlot = true;
+    // Bypass: intentar adquirir slot normal; si está lleno, continuar de todas formas sin tocar el contador.
+    acquiredSlot = await acquireBrowserSlot(redis).catch(() => false);
+    gotSlot = true; // siempre procede independientemente del contador
   } else {
     try {
       gotSlot = await acquireBrowserSlot(redis);
+      acquiredSlot = gotSlot;
     } catch (slotErr) {
       console.error(`[worker] acquireBrowserSlot error (${taskId.slice(0, 8)}):`, slotErr instanceof Error ? slotErr.message : slotErr);
     }
@@ -3666,7 +3668,7 @@ export async function runOneTask(sb: SupabaseClient, redis: RedisClient, taskId:
       }
       await closeSession(browser.browser).catch(() => {});
     }
-    await releaseBrowserSlot(redis);
+    if (acquiredSlot) await releaseBrowserSlot(redis);
   }
 }
 
